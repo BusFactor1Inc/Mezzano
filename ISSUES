@@ -43,6 +43,8 @@ REPL:
   - Lack of completion for symbols
 
 Doesn't seem to work when given > 2G of ram
+   - it looks like the pinned area starts at 2G and the wired area at 2M (gc.lisp:1011/12 in calls to rebuild-freelist)
+      - search for (* 2 1024 1024 1024) to find all references to the pinned area and replace by a tunable constant?
 
 When loading a file, the redefinition of each class is askedfor.  It
 would be nice to have them all be redefined at once like in CCL.
