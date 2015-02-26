@@ -17,12 +17,15 @@ Stop the world GC
     - need to experiment to see what the appropriate nursery size is (try 32M to start)
     - this area will be mark and sweep gc, see how it's done for pinned areas in gc.lisp
     - follow the guidelines in the c2 wiki page
+  - make trimming of cons and general areas optional during gc-cycle
 
 Protect/Release range are very slow (syste/gc.lisp).
   - the oldspace is protected readonly, newspace is readwrite after gc
   - this could be a bit paranoid, it it really needed now that the system is working?
   - could save a lot of time during gc by disabling this
   - if not disabling this, the page table lookups look like they might be the slow part
+    - disabled protecting oldspace and it works fine
+    - still unprotects newspace every gc; can this be done once during initialization?
 
 Compiler:
   - slow and uses a lot of memory so it gc's a lot
