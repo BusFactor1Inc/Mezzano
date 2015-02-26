@@ -1,0 +1,64 @@
+Mouse Pointer movement
+  - moves but then snaps back to original position
+
+Stop the world GC
+  - how could it be made incremental, concurrent?
+  - every allocation holds a mutex. no per-thread nurseries
+  - local files are stored in dynamic space and copied on every gc
+  - when is a gc triggered?  can it be triggered less until an
+    incremental gc has been written?
+
+Protect/Release range are very slow (syste/gc.lisp).
+
+Compiler is slow and uses lots of memory so it gc's a lot
+
+Self hosting
+
+Real local file system (vfat?)
+
+Editor:
+   - no undo
+   - no incremental search
+   - no modeline
+   - no color highlighting
+   - no paren matching
+   - lack of file completion during C-x C-f
+
+  - when doing C-c C-c to evaluate expression, which package is it
+     going into? Looks like common-lisp-user; need to be able to
+     specify the package. Further investigation show it looks like it
+     should handle this already (buffer-current-package and
+     eval-top-level-form-command).
+     
+   - saving gui/compositor.c caused some sort of encoding problem with
+     the pound symbol and another one. had to revert using git.
+
+REPL:
+  - Lack of working C-c
+  - Sometimes a closing #\) evaluates, sometimes not
+  - Lack of completion for symbols
+
+Doesn't seem to work when given > 2G of ram
+
+When loading a file, the redefinition of each class is askedfor.  It
+would be nice to have them all be redefined at once like in CCL.
+
+
+GUI:
+   - can't move windows by clicking in the title bar.
+   - no way to switch windows with the keyboard (Alt-Tab?)
+   - tiling window manager (port stump?)
+
+End of file error when loading ipl.llf, have to start desktop manually
+
+Remote files create a new connection for every operation; could this
+be made to use longer lasting connections?
+
+Only single floats supported
+
+Running out of memory causes an abort in pager.lisp.  Should try and
+do a gc before giving up.  See supervisor/store.lisp:store-alloc-1 and
+see if that can be done. One way to run out of memory is to set
+system/gc.lisp:*memory-expansion* to (* 256 1024 1024) and it will run
+out of memory during boot.
+
