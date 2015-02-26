@@ -23,7 +23,7 @@
 (defvar *memory-expansion-remaining* 0)
 
 ;; What *MEMORY-EXPANSION-REMAINING* should be set to after a GC.
-(defvar *memory-expansion* (* 64 1024 1024))
+(defvar *memory-expansion* (* 128 1024 1024))
 
 (defun room (&optional (verbosity :default))
   (let ((total-used 0)
