@@ -7,6 +7,10 @@ Stop the world GC
   - local files are stored in dynamic space and copied on every gc
   - when is a gc triggered?  can it be triggered less until an
     incremental gc has been written?
+  - Generational garbage collection overviews: 
+      http://c2.com/cgi/wiki?GenerationalGarbageCollection
+      http://home.pipeline.com/~hbaker1/YoungGen.html
+      http://www.memorymanagement.org/
 
 Protect/Release range are very slow (syste/gc.lisp).
 
