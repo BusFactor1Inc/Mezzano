@@ -1,5 +1,6 @@
 Mouse Pointer movement
   - moves but then snaps back to original position
+  - fixed with a hack in compositor.lisp, but, why is the hardware sending these messages at all?
 
 Stop the world GC
   - how could it be made incremental, concurrent?
@@ -11,12 +12,25 @@ Stop the world GC
       http://c2.com/cgi/wiki?GenerationalGarbageCollection
       http://home.pipeline.com/~hbaker1/YoungGen.html
       http://www.memorymanagement.org/
+  - to begin, create a single nursery for the general area
+    - current general area could be for old objects, which is allocated into when not enough space in the nursery
+    - need to experiment to see what the appropriate nursery size is (try 32M to start)
+    - this area will be mark and sweep gc, see how it's done for pinned areas in gc.lisp
+    - follow the guidelines in the c2 wiki page
 
 Protect/Release range are very slow (syste/gc.lisp).
+  - the oldspace is protected readonly, newspace is readwrite after gc
+  - this could be a bit paranoid, it it really needed now that the system is working?
+  - could save a lot of time during gc by disabling this
+  - if not disabling this, the page table lookups look like they might be the slow part
 
-Compiler is slow and uses lots of memory so it gc's a lot
+Compiler:
+  - slow and uses a lot of memory so it gc's a lot
+  - does it save file/line number information? if not, make it so
+  - only single floats supported
 
 Self hosting
+  - test to see which system modules can't be compiled by the mz compiler
 
 Real local file system (vfat?)
 
@@ -26,7 +40,11 @@ Editor:
    - no modeline
    - no color highlighting
    - no paren matching
+   - no auto indentation
    - lack of file completion during C-x C-f
+   - More emacs keybindings: C-o, C-m, C-j, M-C-x
+   - no jump/pop to/from source M-./M-* (see compiler for adding line/file information)
+   - no symbol completion M-/
 
   - when doing C-c C-c to evaluate expression, which package is it
      going into? Looks like common-lisp-user; need to be able to
@@ -40,31 +58,29 @@ Editor:
 REPL:
   - Lack of working C-c
   - Sometimes a closing #\) evaluates, sometimes not
-  - Lack of completion for symbols
+  - Lack of tab completion for symbols
 
 Doesn't seem to work when given > 2G of ram
    - it looks like the pinned area starts at 2G and the wired area at 2M (gc.lisp:1011/12 in calls to rebuild-freelist)
       - search for (* 2 1024 1024 1024) to find all references to the pinned area and replace by a tunable constant?
+      - this might be a red herring
 
-When loading a file, the redefinition of each class is askedfor.  It
+When loading an .llf file, the redefinition of each class is asked for.  It
 would be nice to have them all be redefined at once like in CCL.
-
 
 GUI:
    - can't move windows by clicking in the title bar.
    - no way to switch windows with the keyboard (Alt-Tab?)
    - tiling window manager (port stump?)
 
-End of file error when loading ipl.llf, have to start desktop manually
+End of file error when loading ipl.llf after loading fs-viewer.llf, have to start desktop manually
 
 Remote files create a new connection for every operation; could this
 be made to use longer lasting connections?
-
-Only single floats supported
 
 Running out of memory causes an abort in pager.lisp.  Should try and
 do a gc before giving up.  See supervisor/store.lisp:store-alloc-1 and
 see if that can be done. One way to run out of memory is to set
 system/gc.lisp:*memory-expansion* to (* 256 1024 1024) and it will run
-out of memory during boot.
+out of memory during cold boot.
 
