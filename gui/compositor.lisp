@@ -632,10 +632,14 @@ A passive drag sends no drag events to the window.")
   ;; Update positions and buttons
   (let* ((buttons (mouse-button-state event))
          (changes (logxor *mouse-buttons* buttons))
-         (x-motion (mouse-x-motion event))
+         (x-motion (let ((xm (mouse-x-motion event)))
+                     (if (> (abs xm) 17)
+                         0 xm))) ;; stop the back jumping!
          (old-x *mouse-x*)
          (new-x (+ *mouse-x* x-motion))
-         (y-motion (mouse-y-motion event))
+         (y-motion (let ((ym (mouse-y-motion event)))
+                     (if (> (abs ym) 17)
+                         0 ym))) ;; stop the back jumping!
          (old-y *mouse-y*)
          (new-y (+ *mouse-y* y-motion)))
     (multiple-value-bind (width height)
