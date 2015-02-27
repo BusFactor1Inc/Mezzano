@@ -88,3 +88,6 @@ see if that can be done. One way to run out of memory is to set
 system/gc.lisp:*memory-expansion* to (* 256 1024 1024) and it will run
 out of memory during cold boot.
 
+Using 'when' casues allocatin? Tried to write code using 'when' in gc-cycle in this caused a panic due to 
+allocation during gc.
+
