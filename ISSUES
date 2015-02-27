@@ -48,6 +48,7 @@ Editor:
    - More emacs keybindings: C-o, C-m, C-j, M-C-x
    - no jump/pop to/from source M-./M-* (see compiler for adding line/file information)
    - no symbol completion M-/
+   - compile-buffer, eval-buffer, compile-fiel
 
   - when doing C-c C-c to evaluate expression, which package is it
      going into? Looks like common-lisp-user; need to be able to
