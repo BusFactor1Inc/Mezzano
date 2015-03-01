@@ -64,12 +64,6 @@ REPL:
   - Sometimes a closing #\) evaluates, sometimes not
   - Lack of tab completion for symbols
 
-Doesn't seem to work when given > 2G of ram
-   - it looks like the pinned area starts at 2G and the wired area at 2M (gc.lisp:1011/12 in calls to rebuild-freelist)
-      - search for (* 2 1024 1024 1024) to find all references to the pinned area and replace by a tunable constant?
-      - this might be a red herring
-   - goes into a reboot cycle when machine has 2G+
-
 When loading an .llf file, the redefinition of each class is asked for.  It
 would be nice to have them all be redefined at once like in CCL.
 
