@@ -74,12 +74,23 @@
   next
   (sys.lap-x86:ret))
 
+(defconstant +tss-ist-1+ 36)
+(defconstant +tss-ist-2+ 44)
+(defconstant +tss-ist-3+ 52)
+(defconstant +tss-ist-4+ 60)
+(defconstant +tss-ist-5+ 68)
+(defconstant +tss-ist-6+ 76)
+(defconstant +tss-ist-7+ 84)
+
+(defconstant +tss-io-map-base+ 102)
+
 (defun initialize-boot-cpu ()
   "Generate GDT, IDT and TSS for the boot CPU."
   ;; Carve out a pair of pages.
   (let* ((frame (allocate-physical-pages 2 "CPU data"))
          (addr (+ +physical-map-base+ (ash frame 12)))
          (tss-base (+ addr +cpu-info-tss-offset+)))
+    (debug-print-line "Allocated frame " frame " for cpu data")
     ;; IDT completely fills the second page (256 * 16)
     (dotimes (i 256)
       (multiple-value-bind (lo hi)
@@ -96,25 +107,27 @@
     ;; GDT.
     (setf (sys.int::memref-unsigned-byte-64 (+ addr +cpu-info-gdt-offset+) 0) 0 ; NULL seg.
           (sys.int::memref-unsigned-byte-64 (+ addr +cpu-info-gdt-offset+) 1) #x00209A0000000000 ; Kernel CS64
-          ;; TSS low.
-          (sys.int::memref-unsigned-byte-64 (+ addr +cpu-info-gdt-offset+) 2) (logior (ldb (byte 16 0) +cpu-info-tss-size+)
-                                                                                      (ash (ldb (byte 24 0) tss-base) 16)
-                                                                                      (ash #x89 40)
-                                                                                      (ash (ldb (byte 4 16) +cpu-info-tss-size+) 48)
-                                                                                      (ash (ldb (byte 8 24) tss-base) 56))
+          ;; TSS low. Does not fit in a fixnum when treated as a 64-bit value, depending on where the info page
+          ;; was allocated.
+          (sys.int::memref-unsigned-byte-32 (+ addr +cpu-info-gdt-offset+ (* 2 8)) 0) (logior (ldb (byte 16 0) +cpu-info-tss-size+)
+                                                                                              (ash (ldb (byte 16 0) tss-base) 16))
+          (sys.int::memref-unsigned-byte-32 (+ addr +cpu-info-gdt-offset+ (* 2 8)) 1) (logior (ldb (byte 8 16) tss-base)
+                                                                                              (ash #x89 8)
+                                                                                              (ash (ldb (byte 4 16) +cpu-info-tss-size+) 16)
+                                                                                              (ash (ldb (byte 8 24) tss-base) 24))
           ;; TSS high.
           (sys.int::memref-unsigned-byte-64 (+ addr +cpu-info-gdt-offset+) 3) (ldb (byte 32 32) tss-base))
     ;; TSS, Clear memory first.
     (dotimes (i +cpu-info-tss-size+)
       (setf (sys.int::memref-unsigned-byte-16 tss-base i) 0))
     ;; IST1.
-    (setf (sys.int::memref-signed-byte-64 (+ tss-base 36) 0) (+ sys.int::*exception-stack-base*
-                                                                sys.int::*exception-stack-size*))
+    (setf (sys.int::memref-signed-byte-64 (+ tss-base +tss-ist-1+) 0) (+ sys.int::*exception-stack-base*
+                                                                         sys.int::*exception-stack-size*))
     ;; IST2.
-    (setf (sys.int::memref-signed-byte-64 (+ tss-base 44) 0) (+ sys.int::*irq-stack-base*
-                                                                sys.int::*irq-stack-size*))
+    (setf (sys.int::memref-signed-byte-64 (+ tss-base +tss-ist-2+) 0) (+ sys.int::*irq-stack-base*
+                                                                         sys.int::*irq-stack-size*))
     ;; I/O Map Base Address, follows TSS body.
-    (setf (sys.int::memref-unsigned-byte-16 (+ tss-base 102) 0) 104)
+    (setf (sys.int::memref-unsigned-byte-16 (+ tss-base +tss-io-map-base+) 0) +cpu-info-tss-size+)
     ;; Other stuff.
     (setf (sys.int::memref-t (+ addr +cpu-info-self-offset+) 0) addr)
     ;; Shove the cpu info page into FS.
