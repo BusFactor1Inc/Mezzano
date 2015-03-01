@@ -147,18 +147,22 @@
   t)
 
 (defun unexport-one-symbol (symbol package)
-  (let* ((name (symbol-name symbol))
-	 (externals (package-external-symbols package))
-	 (s (gethash name externals)))
-    (unless s
-      (error "Attempt to unexport non-external symbol ~S in package ~S." symbol package))
-    ;; Remove the symbol from the external symbols
-    (remhash name externals)
-    ;; And add to the internal-symbols list.
-    (setf (gethash name (package-internal-symbols package)) symbol)))
+  (let* ((name (symbol-name symbol)))
+    (multiple-value-bind (sym mode)
+	(find-symbol name package)
+      (case mode
+	(:external
+	 ;; Remove the symbol from the external symbols
+	 (remhash name (package-external-symbols package))
+	 ;; And add to the internal-symbols list.
+	 (setf (gethash name (package-internal-symbols package)) symbol))
+	((:internal :inherited))
+	(t
+	 (error "Cannot unexport unaccessable symbol ~S for package ~S." symbol package)))))
+  t)
 
 (defun unexport (symbols &optional (package *package*))
-  (let ((p (find-package-of-die package)))
+  (let ((p (find-package-or-die package)))
     (if (listp symbols)
 	(dolist (s symbols)
 	  (unexport-one-symbol s p))
