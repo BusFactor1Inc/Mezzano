@@ -70,10 +70,19 @@ GUI:
    - can't move windows by clicking in the title bar.
    - can't resize windows with the mouse
    - no way to switch windows with the keyboard (Alt-Tab?)
+(defun activate-next-window ()
+  (flet ((next-in-list (e l)
+	   "Give the next entry after e in the list l, wrapping around."
+	   (let ((pos (position e l)))
+	     (if (= pos (1- (length l)))
+		 (car l)
+		 (nth (1+ pos) l)))))
+  (let ((next (next-in-list *active-window* *window-list*)))
+    (activate-window next))))
    - tiling window manager (port stump?)
 
 Using 'when' casues allocation? Tried to write code using 'when' in gc-cycle in this caused a panic due to 
 allocation during gc.
 
-HPET timer driver.
+HPET timer driver. Requires ACPI support to find base address of the HPET.
 
