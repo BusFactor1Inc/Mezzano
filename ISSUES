@@ -75,3 +75,5 @@ GUI:
 Using 'when' casues allocation? Tried to write code using 'when' in gc-cycle in this caused a panic due to 
 allocation during gc.
 
+HPET timer driver.
+
