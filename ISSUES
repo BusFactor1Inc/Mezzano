@@ -38,29 +38,34 @@ Self hosting
 Real local file system (vfat?)
 
 Editor:
-   - no undo
-   - no incremental search
-   - no modeline
-   - no color highlighting
-   - no paren matching
-   - no auto indentation
-   - lack of file completion during C-x C-f
    - More emacs keybindings: C-o, C-m, C-j, M-C-x
-   - no jump/pop to/from source M-./M-* (see compiler for adding line/file information)
-   - no symbol completion M-/
-   - compile-buffer, eval-buffer, compile-fiel
-
-  - when doing C-c C-c to evaluate expression, which package is it
-     going into? Looks like common-lisp-user; need to be able to
-     specify the package. Further investigation show it looks like it
-     should handle this already (buffer-current-package and
-     eval-top-level-form-command).
-     
-   - saving gui/compositor.c caused some sort of encoding problem with
-     the pound symbol and another one. had to revert using git.
-     
+   - compile-buffer, eval-buffer, compile-file (C-ck), eval-expression (M-:), eval-last-sexp (C-xe)
+   - basic search for string, search for regex (can MZ compile cl-PPCRE?)
+   - incremental search
+   - no paren matching
+   - no auto indentation (basic electric newline?)
+   
   - create *Messages* buffer, create function #'message, replace calls to (format t ...) with calls 
     to #'message, insert text into *Messages* in #'messages
+    - would like to create a stream type that will write to a buffer (buffer-stream?), that way format
+      could still be used and one would not have to use a #'message function
+      -  https://github.com/sbcl/sbcl/blob/master/doc/manual/gray-streams-examples.texinfo
+      
+  - create a proper minibuffer area for displaying messages and getting input
+    - curently the title contains some of what would be in a mode-line
+
+   - bigger features
+     - undo
+     - color highlighting (hard, might want to just use italic/bold for keywords at first)
+     - file completion during C-x C-f
+     - symbol completion during M-: 
+     - jump/pop to/from source M-./M-* (see compiler for adding line/file information)
+     - 'hippy' symbol completion M-/
+
+   - Encoding BUG: saving gui/compositor.c caused some sort of encoding problem with
+     the pound symbol and another one. had to revert using git. also happens on 
+     copywrite symbol in the README.
+     
 
 REPL:
   - Lack of working C-c
