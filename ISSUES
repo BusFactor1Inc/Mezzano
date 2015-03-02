@@ -1,7 +1,3 @@
-Mouse Pointer movement
-  - moves but then snaps back to original position
-  - fixed with a hack in compositor.lisp, but, why is the hardware sending these messages at all?
-
 Stop the world GC
   - how could it be made incremental, concurrent?
   - every allocation holds a mutex. no per-thread nurseries
@@ -18,14 +14,6 @@ Stop the world GC
     - this area will be mark and sweep gc, see how it's done for pinned areas in gc.lisp
     - follow the guidelines in the c2 wiki page
   - make trimming of cons and general areas optional during gc-cycle
-
-Protect/Release range are very slow (syste/gc.lisp).
-  - the oldspace is protected readonly, newspace is readwrite after gc
-  - this could be a bit paranoid, it it really needed now that the system is working?
-  - could save a lot of time during gc by disabling this
-  - if not disabling this, the page table lookups look like they might be the slow part
-    - disabled protecting oldspace and it works fine
-    - still unprotects newspace every gc; can this be done once during initialization?
 
 Compiler:
   - slow and uses a lot of memory so it gc's a lot
@@ -66,9 +54,12 @@ Editor:
      the pound symbol and another one. had to revert using git. also happens on 
      copywrite symbol in the README.
      
+     
+Threads:
+  - no way to kill running threads from the outside
 
 REPL:
-  - Lack of working C-c
+  - Lack of C-c/abort
   - Sometimes a closing #\) evaluates, sometimes not
   - Lack of tab completion for symbols
 
@@ -77,20 +68,10 @@ would be nice to have them all be redefined at once like in CCL.
 
 GUI:
    - can't move windows by clicking in the title bar.
+   - can't resize windows with the mouse
    - no way to switch windows with the keyboard (Alt-Tab?)
    - tiling window manager (port stump?)
 
-End of file error when loading ipl.llf after loading fs-viewer.llf, have to start desktop manually
-
-Remote files create a new connection for every operation; could this
-be made to use longer lasting connections?
-
-Running out of memory causes an abort in pager.lisp.  Should try and
-do a gc before giving up.  See supervisor/store.lisp:store-alloc-1 and
-see if that can be done. One way to run out of memory is to set
-system/gc.lisp:*memory-expansion* to (* 256 1024 1024) and it will run
-out of memory during cold boot.
-
-Using 'when' casues allocatin? Tried to write code using 'when' in gc-cycle in this caused a panic due to 
+Using 'when' casues allocation? Tried to write code using 'when' in gc-cycle in this caused a panic due to 
 allocation during gc.
 
