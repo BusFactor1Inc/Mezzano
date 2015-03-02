@@ -58,6 +58,9 @@ Editor:
      
    - saving gui/compositor.c caused some sort of encoding problem with
      the pound symbol and another one. had to revert using git.
+     
+  - create *Messages* buffer, create function #'message, replace calls to (format t ...) with calls 
+    to #'message, insert text into *Messages* in #'messages
 
 REPL:
   - Lack of working C-c
