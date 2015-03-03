@@ -26,6 +26,19 @@ Self hosting
 Real local file system (vfat?)
 
 Editor:
+   - commit optimized buffer-string
+    (defun buffer-string (buffer mark-1 mark-2)
+   (setf (values mark-1 mark-2) (order-marks mark-1 mark-2))
+  (let ((string (make-array 0 :element-type 'character :fill-pointer t :adjustable t)))
+     (do ((m1 (copy-mark mark-1))
+          (m2 (copy-mark mark-2)))
+         ((mark= m1 m2))
+       (if (end-of-line-p m1)
+          (vector-push-extend #\Newline string)
+          (vector-push-extend (line-character (mark-line m1) (mark-charpos m1)) string))
+      (move-mark m1))
+    (coerce string 'string))))
+    
    - More emacs keybindings: C-o, C-m, C-j, M-C-x
    - compile-buffer, eval-buffer, compile-file (C-ck), eval-expression (M-:), eval-last-sexp (C-xe)
    - basic search for string, search for regex (can MZ compile cl-PPCRE?)
