@@ -38,13 +38,10 @@ Editor:
           (vector-push-extend (line-character (mark-line m1) (mark-charpos m1)) string))
       (move-mark m1))
     (coerce string 'string))))
-    
-   - More emacs keybindings: C-o, C-m, C-j, M-C-x
-   - compile-buffer, eval-buffer, compile-file (C-ck), eval-expression (M-:), eval-last-sexp (C-xe)
-   - basic search for string, search for regex (can MZ compile cl-PPCRE?)
+   - search for regex (can MZ compile cl-PPCRE?)
    - incremental search
-   - no paren matching
-   - no auto indentation (basic electric newline?)
+   - paren matching
+   - auto indentation (basic electric newline?)
    
   - create *Messages* buffer, create function #'message, replace calls to (format t ...) with calls 
     to #'message, insert text into *Messages* in #'messages
