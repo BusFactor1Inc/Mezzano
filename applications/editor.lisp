@@ -19,21 +19,29 @@
    (%buffer :initarg :buffer :accessor line-buffer))
   (:default-initargs :next nil
                      :prev nil
-                     :data (make-array 50 :element-type 'character :adjustable t :fill-pointer 0)
+                     :data (make-array 50 :element-type 'cons :adjustable t :fill-pointer 0)
                      :version 0
                      :number 0
                      :mark-list '()
                      :buffer nil))
 
 (defgeneric line-character (line charpos))
+(defgeneric line-attributes (line charpos))
 (defgeneric (setf line-character) (value line charpos))
+(defgeneric (setf line-attributes) (value line charpos))
 (defgeneric line-length (line))
 
 (defmethod line-character ((line line) charpos)
-  (aref (data line) charpos))
+  (car (aref (data line) charpos)))
+
+(defmethod line-attributes ((line line) charpos)
+  (cdr (aref (data line) charpos)))
 
 (defmethod (setf line-character) (value (line line) charpos)
-  (setf (aref (data line) charpos) value))
+  (setf (car (aref (data line) charpos)) value))
+
+(defmethod (setf line-attributes) (value (line line) charpos)
+  (setf (cdr (aref (data line) charpos)) value))
 
 (defmethod line-length ((line line))
   (length (data line)))
@@ -98,6 +106,7 @@
    (%buffer :initarg :buffer :accessor current-buffer)
    (%last-buffer :initarg :last-buffer :accessor last-buffer)
    (%font :initarg :font :reader font)
+   (%font-bold :initarg :font-bold :reader font-bold)
    (%foreground-colour :initarg :foreground-colour :accessor foreground-colour)
    (%background-colour :initarg :background-colour :accessor background-colour)
    (%killed-region :initarg :killed-region :accessor killed-region)
@@ -328,7 +337,7 @@ Don't use this, use INSERT instead."
                                   :prev current-line
                                   :data (make-array (- (line-length current-line)
                                                        current-charpos)
-                                                    :element-type 'character
+                                                    :element-type 'cons
                                                     :adjustable t
                                                     :fill-pointer t))))
     ;; Update line contents.
@@ -373,14 +382,14 @@ Don't use this directly, use INSERT instead."
          (current-charpos (mark-charpos point)))
     (cond ((eql (line-length current-line) current-charpos)
            ;; Inserting at end.
-           (vector-push-extend character (data current-line)))
+           (vector-push-extend (list character) (data current-line)))
           (t ;; Inserting in the middle or at the start.
            ;; Make sure the vector is long enough.
-           (vector-push-extend character (data current-line))
+           (vector-push-extend (list character) (data current-line))
            (replace (data current-line) (data current-line)
                     :start1 (1+ current-charpos)
                     :start2 current-charpos)
-           (setf (aref (data current-line) current-charpos) character)))
+           (setf (aref (data current-line) current-charpos) (list character))))
     (incf (line-version current-line))
     ;; Update marks.
     (dolist (mark (line-mark-list current-line))
@@ -474,7 +483,7 @@ Returns the deleted region as a pair of marks into a disembodied line."
                 (start (mark-charpos mark-1))
                 (end (mark-charpos mark-2))
                 (data (make-array (- end start)
-                                  :element-type 'character
+                                  :element-type 'cons
                                   :adjustable t
                                   :fill-pointer t)))
            ;; Extract deleted data.
@@ -506,7 +515,7 @@ Returns the deleted region as a pair of marks into a disembodied line."
                 (last-line (mark-line mark-2))
                 (last-chpos (mark-charpos mark-2))
                 (data (make-array (- (line-length first-line) first-chpos)
-                                  :element-type 'character
+                                  :element-type 'cons
                                   :adjustable t
                                   :fill-pointer t)))
            (replace data (data first-line) :start2 first-chpos)
@@ -595,14 +604,15 @@ then merge the current line and next line."
 
 (defun buffer-string (buffer mark-1 mark-2)
   (setf (values mark-1 mark-2) (order-marks mark-1 mark-2))
-  (with-output-to-string (str)
+  (let ((string (make-array 0 :element-type 'character :fill-pointer t :adjustable t)))
     (do ((m1 (copy-mark mark-1))
          (m2 (copy-mark mark-2)))
         ((mark= m1 m2))
       (if (end-of-line-p m1)
-          (terpri str)
-          (write-char (line-character (mark-line m1) (mark-charpos m1)) str))
-      (move-mark m1))))
+          (vector-push-extend #\Newline string)
+          (vector-push-extend (line-character (mark-line m1) (mark-charpos m1)) string))
+      (move-mark m1))
+    (coerce string 'string)))
 
 ;;; Point motion.
 
@@ -963,6 +973,7 @@ Tries to stay as close to the hint column as possible."
     (loop
        with pen = 0
        with font = (font *editor*)
+       with font-bold = (font *editor*)
        with baseline = (mezzano.gui.font:ascender font)
        with foreground = (foreground-colour *editor*)
        with background = (background-colour *editor*)
@@ -1381,7 +1392,7 @@ Returns true when the screen is up-to-date, false if the screen is dirty and the
                        :if-does-not-exist :create)
       (do ((line (first-line buffer) (next-line line)))
           ((not line))
-        (write-sequence (data line) s)
+        (write-sequence (map 'string #'car (data line)) s)
         (when (next-line line)
           (terpri s))))
     (setf (buffer-property buffer 'new-file) nil
