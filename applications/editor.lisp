@@ -1367,6 +1367,13 @@ Returns true when the screen is up-to-date, false if the screen is dirty and the
              (filespec (merge-pathnames path)))
         (rename-buffer buffer (file-namestring filespec))
         (setf (buffer-property buffer 'path) filespec)))
+    ;; Make a backup of the file before writing, if it already exists
+    (when (and *save-backup-files*
+               (probe-file (buffer-property buffer 'path)))
+      (rename-file (buffer-property buffer 'path)
+                   (pathname (concatenate 'string
+                                          (namestring (buffer-property buffer 'path))
+                                          "~"))))
     (with-open-file (s (buffer-property buffer 'path)
                        :direction :output
                        :if-exists :new-version
