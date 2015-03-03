@@ -973,7 +973,7 @@ Tries to stay as close to the hint column as possible."
     (loop
        with pen = 0
        with font = (font *editor*)
-       with font-bold = (font *editor*)
+       with font-bold = (font-bold *editor*)
        with baseline = (mezzano.gui.font:ascender font)
        with foreground = (foreground-colour *editor*)
        with background = (background-colour *editor*)
@@ -1741,52 +1741,54 @@ If no such form is found, then return the CL-USER package."
 
 (defun editor-main (width height initial-file)
   (mezzano.gui.font:with-font (font mezzano.gui.font:*default-monospace-font* mezzano.gui.font:*default-monospace-font-size*)
-    (let ((fifo (mezzano.supervisor:make-fifo 50)))
-      (mezzano.gui.compositor:with-window (window fifo (or width 640) (or height 700) :kind :editor)
-        (let* ((framebuffer (mezzano.gui.compositor:window-buffer window))
-               (frame (make-instance 'mezzano.gui.widgets:frame
-                                     :framebuffer framebuffer
-                                     :title "Editor"
-                                     :close-button-p t
-                                     :damage-function (mezzano.gui.widgets:default-damage-function window)))
-               (*editor* (make-instance 'editor
-                                        :fifo fifo
-                                        :font font
-                                        :window window
-                                        :frame frame
-                                        :buffer (make-instance 'buffer)))
-               (*last-command* nil)
-               (*last-character* nil)
-               (*last-chord* nil)
-               (*minibuffer* (make-instance 'buffer))
-               (*minibuffer-key-map* (make-hash-table))
-               (*default-pathname-defaults* *default-pathname-defaults*))
-          (initialize-key-map (global-key-map *editor*))
-          (initialize-minibuffer-key-map *minibuffer-key-map*)
-          (mezzano.gui.widgets:draw-frame frame)
-          (multiple-value-bind (left right top bottom)
-              (mezzano.gui.widgets:frame-size (frame *editor*))
-            (mezzano.gui:bitset (- (mezzano.gui.compositor:height window) top bottom)
-                                (- (mezzano.gui.compositor:width window) left right)
-                                (background-colour *editor*)
-                                framebuffer
-                                top left)
-            (mezzano.gui.compositor:damage-window window
-                                                  left top
-                                                  (- (mezzano.gui.compositor:width window) left right)
-                                                  (- (mezzano.gui.compositor:height window) top bottom)))
-          (switch-to-buffer (get-buffer-create "*Scratch*"))
-          (ignore-errors
-            (when initial-file
-              (find-file initial-file)))
-          (catch 'quit
-            (loop
-               (handler-case
-                   (editor-loop)
-                 (error (c)
-                   (ignore-errors
-                     (format t "Editor error: ~A~%" c)
-                     (setf (pending-redisplay *editor*) t)))))))))))
+    (mezzano.gui.font:with-font (font-bold mezzano.gui.font::*default-monospace-bold-font* mezzano.gui.font:*default-monospace-font-size*)
+      (let ((fifo (mezzano.supervisor:make-fifo 50)))
+	(mezzano.gui.compositor:with-window (window fifo (or width 640) (or height 700) :kind :editor)
+	  (let* ((framebuffer (mezzano.gui.compositor:window-buffer window))
+		 (frame (make-instance 'mezzano.gui.widgets:frame
+				       :framebuffer framebuffer
+				       :title "Editor"
+				       :close-button-p t
+				       :damage-function (mezzano.gui.widgets:default-damage-function window)))
+		 (*editor* (make-instance 'editor
+					  :fifo fifo
+					  :font font
+					  :font-bold font-bold
+					  :window window
+					  :frame frame
+					  :buffer (make-instance 'buffer)))
+		 (*last-command* nil)
+		 (*last-character* nil)
+		 (*last-chord* nil)
+		 (*minibuffer* (make-instance 'buffer))
+		 (*minibuffer-key-map* (make-hash-table))
+		 (*default-pathname-defaults* *default-pathname-defaults*))
+	    (initialize-key-map (global-key-map *editor*))
+	    (initialize-minibuffer-key-map *minibuffer-key-map*)
+	    (mezzano.gui.widgets:draw-frame frame)
+	    (multiple-value-bind (left right top bottom)
+		(mezzano.gui.widgets:frame-size (frame *editor*))
+	      (mezzano.gui:bitset (- (mezzano.gui.compositor:height window) top bottom)
+				  (- (mezzano.gui.compositor:width window) left right)
+				  (background-colour *editor*)
+				  framebuffer
+				  top left)
+	      (mezzano.gui.compositor:damage-window window
+						    left top
+						    (- (mezzano.gui.compositor:width window) left right)
+						    (- (mezzano.gui.compositor:height window) top bottom)))
+	    (switch-to-buffer (get-buffer-create "*Scratch*"))
+	    (ignore-errors
+	      (when initial-file
+		(find-file initial-file)))
+	    (catch 'quit
+	      (loop
+		 (handler-case
+		     (editor-loop)
+		   (error (c)
+		     (ignore-errors
+		       (format t "Editor error: ~A~%" c)
+		       (setf (pending-redisplay *editor*) t))))))))))))
 
 (defun spawn (&key width height initial-file)
   (mezzano.supervisor:make-thread (lambda () (editor-main width height initial-file))
