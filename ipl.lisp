@@ -8,12 +8,12 @@
 
 ;; Host where the initial system is kept.
 ;; Change the IP to the host computer's local IP.
-(mezzano.file-system.remote:add-simple-file-host :remote '(192 168 1 71))
+(mezzano.file-system.remote:add-simple-file-host :remote '(144 111 171 159))
 ;; Use PATHNAME instead of #p because the cross-compiler doesn't support #p.
 ;; Point *DEFAULT-PATHNAME-DEFAULTS* at the full path to the source tree.
-(setf *default-pathname-defaults* (pathname "REMOTE:/root/common-lisp/Mezzano/"))
+(setf *default-pathname-defaults* (pathname "REMOTE:/home/burton/common-lisp/Mezzano/"))
 ;; Point MEZZANO.FILE-SYSTEM::*HOME-DIRECTORY* at the home directory containing the libraries.
-(setf mezzano.file-system::*home-directory* (pathname "REMOTE:/root/common-lisp/Mezzano/home/"))
+(setf mezzano.file-system::*home-directory* (pathname "REMOTE:/home/burton/common-lisp/Mezzano/home/"))
 
 (defun sys.int::snapshot-and-exit ()
   (mezzano.supervisor:make-thread (lambda ()
