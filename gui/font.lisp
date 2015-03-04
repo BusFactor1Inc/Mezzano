@@ -24,10 +24,11 @@
 
 (in-package :mezzano.gui.font)
 
-(defvar *default-font* "DejaVuSans")
-(defvar *default-font-size* 12)
-(defvar *default-monospace-font* "DejaVuSansMono")
-(defvar *default-monospace-font-size* 12)
+(defvar *default-font* "OCRA")
+(defvar *default-font-size* 10)
+(defvar *default-monospace-font* "OCRA")
+(defvar *default-monospace-bold-font* "OCRABold")
+(defvar *default-monospace-font-size* 10)
 
 (defclass typeface ()
   ((%font-loader :initarg :font-loader :reader font-loader)

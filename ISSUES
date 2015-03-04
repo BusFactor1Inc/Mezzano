@@ -39,6 +39,7 @@ Editor:
       (move-mark m1))
     (coerce string 'string))))
    - search for regex (can MZ compile cl-PPCRE?)
+   - eval buffer
    - incremental search
    - paren matching
    - auto indentation (basic electric newline?)

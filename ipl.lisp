@@ -8,12 +8,12 @@
 
 ;; Host where the initial system is kept.
 ;; Change the IP to the host computer's local IP.
-(mezzano.file-system.remote:add-simple-file-host :remote '(192 168 0 4))
+(mezzano.file-system.remote:add-simple-file-host :remote '(192 168 1 71))
 ;; Use PATHNAME instead of #p because the cross-compiler doesn't support #p.
 ;; Point *DEFAULT-PATHNAME-DEFAULTS* at the full path to the source tree.
-(setf *default-pathname-defaults* (pathname "REMOTE:/Full/path/to/Mezzano/"))
+(setf *default-pathname-defaults* (pathname "REMOTE:/root/common-lisp/Mezzano/"))
 ;; Point MEZZANO.FILE-SYSTEM::*HOME-DIRECTORY* at the home directory containing the libraries.
-(setf mezzano.file-system::*home-directory* (pathname "REMOTE:/Full/path/to/Mezzano/home/"))
+(setf mezzano.file-system::*home-directory* (pathname "REMOTE:/root/common-lisp/Mezzano/home/"))
 
 (defun sys.int::snapshot-and-exit ()
   (mezzano.supervisor:make-thread (lambda ()
@@ -76,9 +76,9 @@ If the compiled file is out of date, recompile it."
 ;; Other stuff.
 ;; The desktop image, this can be removed or replaced.
 ;; If it is removed, then the line below that starts the desktop must be updated.
-(sys.int::copy-file (merge-pathnames "Mandarin_Pair.jpg" (user-homedir-pathname))
-                    "LOCAL:>Desktop.jpeg"
-                    '(unsigned-byte 8))
+;(sys.int::copy-file (merge-pathnames "Mandarin_Pair.jpg" (user-homedir-pathname))
+;                    "LOCAL:>Desktop.jpeg"
+;                    '(unsigned-byte 8))
 
 ;; Loaded from the source tree.
 (sys.int::copy-file "README"
@@ -116,6 +116,6 @@ If the compiled file is out of date, recompile it."
 (sys.int::cal "applications/fs-viewer.lisp")
 ;; If the desktop image was removed above, then remove the :IMAGE argument
 ;; from here.
-(setf sys.int::*desktop* (eval (read-from-string "(mezzano.gui.desktop:spawn :image \"LOCAL:>Desktop.jpeg\")")))
+;(setf sys.int::*desktop* (eval (read-from-string "(mezzano.gui.desktop:spawn :image \"LOCAL:>Desktop.jpeg\")")))
 
 ;; Done.
