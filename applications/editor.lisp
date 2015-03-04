@@ -810,6 +810,25 @@ Tries to stay as close to the hint column as possible."
     (dotimes (i n)
       (funcall fn point))))
 
+(defun search-forward (buffer string)
+  (let ((point (copy-mark (buffer-point buffer))))
+    ;; Search to the end of the buffer
+    (save-excursion (buffer)
+       (move-end-of-buffer buffer)
+        (setf pos (search string (buffer-string buffer point
+                                                (buffer-point buffer)))))
+    (if pos
+       ;; Found the string, go there
+       (move-char buffer (+ pos (length string)))
+       ;; Didn't find it, wrap around and search from the beginning
+       (progn
+         (save-excursion (buffer)
+           (move-beginning-of-buffer buffer)
+           (setf pos (search string (buffer-string buffer (buffer-point buffer) point))))
+         (when pos
+           (move-beginning-of-buffer buffer)
+           (move-char buffer (+ pos (length string))))))))
+
 (defun test-fill (buffer)
   (let ((width (1- (truncate (editor-width)
                              (mezzano.gui.font:glyph-advance (mezzano.gui.font:character-to-glyph (font *editor*) #\M))))))
@@ -1580,34 +1599,6 @@ If no such form is found, then return the CL-USER package."
   (kill-region-command)
   (yank-command))
 
-(defvar *last-search-string* "")
-(defun search-command ()
-  (let* ((string (read-from-minibuffer 
-                   (format nil "Search (default: ~A): " *last-search-string*)))
-         (buffer (current-buffer *editor*))
-         (point (copy-mark (buffer-point buffer)))
-         pos)
-    ;; Just hitting enter will search for the last searched string
-    (when (string= string "")
-      (setf string *last-search-string*))
-    ;; Search to the end of the buffer
-    (save-excursion (buffer)
-        (move-end-of-buffer buffer)
-        (setf pos (search string (buffer-string buffer point
-                                                (buffer-point buffer)))))
-    (if pos
-       ;; Found the string, go there
-       (move-char buffer (+ pos (length string)))
-       ;; Didn't find it, wrap around and search from the beginning
-       (progn
-         (save-excursion (buffer)
-           (move-beginning-of-buffer buffer)
-           (setf pos (search string (buffer-string buffer (buffer-point buffer) point))))
-         (when pos
-           (move-beginning-of-buffer buffer)
-           (move-char buffer (+ pos (length string))))))
-    (setf *last-search-string* string)))
-
 (defun compile-buffer-command ()
   (let* ((buffer (current-buffer *editor*))
          (path (buffer-property buffer 'path)))
@@ -1658,6 +1649,48 @@ If no such form is found, then return the CL-USER package."
               (move-mark (buffer-point buffer) (- (length string)))
               (move-mark (buffer-point buffer) i)
               (return)))))))
+
+(defvar *isearch-string* (make-array 0 :fill-pointer t))
+(defvar *last-isearch-string* *isearch-string*)
+
+(defun isearch-post-command-hook ()
+  (flet ((cancel-isearch ()
+           (print "Cancelling isearch.")
+           (setf (post-command-hooks *editor*)
+                 (remove 'isearch-post-command-hook 
+                          (post-command-hooks *editor*))))
+         (char-at-point (point)
+           (line-character (mark-line point) (mark-charpos point))))
+    (let* ((buffer (current-buffer *editor*))
+           (point (buffer-point buffer)))
+      (if (eql *this-command* 'self-insert-command)
+        (progn
+          (delete-backward-char-command)
+          (if (= 0 (length *isearch-string*))           
+            (progn
+              (scan-forward point (lambda  (c) (char= c *this-character*)))
+              (let ((char-at-point (char-at-point point)))
+                (if (char= *this-character* char-at-point)
+                  (vector-push-extend *this-character* *isearch-string*)
+                  (cancel-isearch))))
+            (let ((char-at-point (char-at-point point))
+                  (next-char (progn (move-mark point 1)
+                                    (character-right-of point)))) ;; FIXME: Hebrew
+              (vector-push-extend *this-character* *isearch-string*)
+              (unless (char= *this-character* char-at-point)
+                (move-mark point -1)
+                (search-forward buffer *isearch-string*)))))
+        (if (eql *this-command* 'isearch-command)
+          (if (= 0 (length *isearch-string*))
+            (search-forward buffer *last-isearch-string*) 
+            (search-forward buffer *isearch-string*))
+          (cancel-isearch))))))
+
+(defun isearch-command ()
+  (unless (member 'isearch-post-command-hook (post-command-hooks *editor*))
+    (setf *last-isearch-string* *isearch-string*)
+    (setf *isearch-string* (make-array 0 :fill-pointer t))
+    (push 'isearch-post-command-hook (post-command-hooks *editor*))))
 
 ;;;; End command wrappers.
 
@@ -1755,7 +1788,7 @@ If no such form is found, then return the CL-USER package."
   (set-key #\Page-Up 'scroll-down-command key-map)
   (set-key '(#\C-C #\C-C) 'eval-top-level-form-command key-map)
   (set-key '(#\C-C #\C-A) 'beginning-of-top-level-form-command key-map)
-  (set-key #\C-S 'search-command key-map)
+  (set-key #\C-S 'isearch-command key-map)
   (set-key #\M-W 'copy-region-command key-map)
   (set-key #\C-M 'newline-command key-map)
   (set-key #\C-J 'newline-command key-map)
@@ -1783,51 +1816,51 @@ If no such form is found, then return the CL-USER package."
     (mezzano.gui.font:with-font (font-bold mezzano.gui.font::*default-monospace-bold-font* mezzano.gui.font:*default-monospace-font-size*)
       (let ((fifo (mezzano.supervisor:make-fifo 50)))
 	(mezzano.gui.compositor:with-window (window fifo (or width 640) (or height 700) :kind :editor)
-	  (let* ((framebuffer (mezzano.gui.compositor:window-buffer window))
-		 (frame (make-instance 'mezzano.gui.widgets:frame
-				       :framebuffer framebuffer
-				       :title "Editor"
-				       :close-button-p t
-				       :damage-function (mezzano.gui.widgets:default-damage-function window)))
-		 (*editor* (make-instance 'editor
-					  :fifo fifo
-					  :font font
-					  :font-bold font-bold
-					  :window window
-					  :frame frame
-					  :buffer (make-instance 'buffer)))
-		 (*last-command* nil)
-		 (*last-character* nil)
-		 (*last-chord* nil)
-		 (*minibuffer* (make-instance 'buffer))
-		 (*minibuffer-key-map* (make-hash-table))
-		 (*default-pathname-defaults* *default-pathname-defaults*))
-	    (initialize-key-map (global-key-map *editor*))
-	    (initialize-minibuffer-key-map *minibuffer-key-map*)
-	    (mezzano.gui.widgets:draw-frame frame)
-	    (multiple-value-bind (left right top bottom)
-		(mezzano.gui.widgets:frame-size (frame *editor*))
-	      (mezzano.gui:bitset (- (mezzano.gui.compositor:height window) top bottom)
-				  (- (mezzano.gui.compositor:width window) left right)
-				  (background-colour *editor*)
-				  framebuffer
-				  top left)
-	      (mezzano.gui.compositor:damage-window window
-						    left top
-						    (- (mezzano.gui.compositor:width window) left right)
-						    (- (mezzano.gui.compositor:height window) top bottom)))
-	    (switch-to-buffer (get-buffer-create "*Scratch*"))
-	    (ignore-errors
-	      (when initial-file
-		(find-file initial-file)))
-	    (catch 'quit
-	      (loop
-		 (handler-case
-		     (editor-loop)
-		   (error (c)
-		     (ignore-errors
-		       (format t "Editor error: ~A~%" c)
-		       (setf (pending-redisplay *editor*) t))))))))))))
+    (let* ((framebuffer (mezzano.gui.compositor:window-buffer window))
+      (frame (make-instance 'mezzano.gui.widgets:frame
+                :framebuffer framebuffer
+                :title "Editor"
+                :close-button-p t
+                :damage-function (mezzano.gui.widgets:default-damage-function window)))
+    (*editor* (make-instance 'editor
+                :fifo fifo
+                :font font
+                :font-bold font-bold
+                :window window
+                :frame frame
+                :buffer (make-instance 'buffer)))
+      (*last-command* nil)
+      (*last-character* nil)
+      (*last-chord* nil)
+      (*minibuffer* (make-instance 'buffer))
+      (*minibuffer-key-map* (make-hash-table))
+      (*default-pathname-defaults* *default-pathname-defaults*))
+      (initialize-key-map (global-key-map *editor*))
+      (initialize-minibuffer-key-map *minibuffer-key-map*)
+      (mezzano.gui.widgets:draw-frame frame)
+      (multiple-value-bind (left right top bottom)
+    (mezzano.gui.widgets:frame-size (frame *editor*))
+        (mezzano.gui:bitset (- (mezzano.gui.compositor:height window) top bottom)
+          (- (mezzano.gui.compositor:width window) left right)
+          (background-colour *editor*)
+          framebuffer
+          top left)
+        (mezzano.gui.compositor:damage-window window
+           left top
+           (- (mezzano.gui.compositor:width window) left right)
+           (- (mezzano.gui.compositor:height window) top bottom)))
+      (switch-to-buffer (get-buffer-create "*Scratch*"))
+      (ignore-errors
+        (when initial-file
+  (find-file initial-file)))
+      (catch 'quit
+        (loop
+   (handler-case
+      (editor-loop)
+      (error (c)
+         (ignore-errors
+           (format t "Editor error: ~A~%" c)
+           (setf (pending-redisplay *editor*) t))))))))))))
 
 (defun spawn (&key width height initial-file)
   (mezzano.supervisor:make-thread (lambda () (editor-main width height initial-file))
