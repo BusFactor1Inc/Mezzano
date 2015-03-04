@@ -1582,7 +1582,8 @@ If no such form is found, then return the CL-USER package."
 
 (defvar *last-search-string* "")
 (defun search-command ()
-  (let* ((string (read-from-minibuffer "Search: "))
+  (let* ((string (read-from-minibuffer 
+                   (format nil "Search (default: ~A): " *last-search-string*)))
          (buffer (current-buffer *editor*))
          (point (copy-mark (buffer-point buffer)))
          pos)
@@ -1620,6 +1621,43 @@ If no such form is found, then return the CL-USER package."
        (move-sexp buffer -1)
        (let ((string (buffer-string buffer point (buffer-point buffer))))
          (print (eval (read-from-string string)))))))
+
+(defun find-matching-paren-command ()
+  "Jump the cursor the paren that matches the one under the cursor."
+  ;; FIXME: skip parens in strings
+  (let* ((buffer (current-buffer *editor*))
+         (point (copy-mark (buffer-point buffer)))
+         (c (line-character (mark-line point) (mark-charpos point))))
+    (when (char= c #\))
+       (beginning-of-top-level-form buffer)
+       (let ((string (buffer-string buffer point (buffer-point buffer)))
+             (count 1))
+         (do ((i (1- (length string)) (decf i)))
+             ((< i 0))
+            (unless (and (> i 1) (and (char= (char string (1- i)) #\\)
+                                      (char= (char string (- i 2)) #\#)))
+              (case (char string i)
+                (#\( (decf count))
+                (#\) (incf count))))
+          (when (zerop count)
+            (move-mark (buffer-point buffer) i)
+            (return)))))
+     (when (char= c #\()
+       (beginning-of-top-level-form buffer)
+       (move-sexp buffer)
+       (let ((string (buffer-string buffer point (buffer-point buffer)))
+             (count 0))
+         (do ((i 0 (incf i)))
+             ((= i (length string)))
+            (unless (and (> i 1) (and (char= (char string (1- i)) #\\)
+                                      (char= (char string (- i 2)) #\#)))
+              (case (char string i)
+                (#\( (incf count))
+                (#\) (decf count))))
+            (when (zerop count)
+              (move-mark (buffer-point buffer) (- (length string)))
+              (move-mark (buffer-point buffer) i)
+              (return)))))))
 
 ;;;; End command wrappers.
 
@@ -1725,7 +1763,8 @@ If no such form is found, then return the CL-USER package."
   (set-key #\M-Backspace 'backward-kill-word-command key-map)
   (set-key #\M-Colon 'eval-expression-command key-map)
   (set-key '(#\C-C #\C-K) 'compile-buffer-command key-map)
-  (set-key '(#\C-X #\C-E) 'eval-last-sexp-command key-map))
+  (set-key '(#\C-X #\C-E) 'eval-last-sexp-command key-map)
+  (set-key #\M-O 'find-matching-paren-command key-map))
 
 (defun initialize-minibuffer-key-map (key-map)
   (initialize-key-map key-map)
