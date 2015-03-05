@@ -1518,6 +1518,13 @@ and mark."
       (move-mark-to-mark (buffer-mark buffer) previous-mark)
       (setf (buffer-mark-active buffer) previous-mark-active))))
 
+(defun symbol-at-point (buffer)
+  (save-excursion (buffer)
+    (move-sexp buffer 1)
+    (let ((point (copy-mark (buffer-point buffer))))
+      (move-sexp buffer -1)
+      (buffer-string buffer point (buffer-point buffer)))))
+
 (defun search-forward (buffer string)
   (let ((point (copy-mark (buffer-point buffer))))
     ;; Search to the end of the buffer
@@ -1696,6 +1703,16 @@ If no such form is found, then return the CL-USER package."
     (setf *isearch-string* nil)
     (push 'isearch-post-command-hook (post-command-hooks *editor*))))
 
+(defun find-symbol-at-point-command ()
+  (let* ((buffer (current-buffer *editor*))
+         (symbol (symbol-at-point buffer)))
+    (loop 
+      (move-sexp buffer 1)
+      (search-forward buffer symbol)
+      (move-sexp buffer -1)
+      (when (string= (symbol-at-point buffer) symbol)
+          (return)))))
+      
 ;;;; End command wrappers.
 
 (defun translate-command (editor character)
@@ -1801,7 +1818,8 @@ If no such form is found, then return the CL-USER package."
   (set-key #\M-Colon 'eval-expression-command key-map)
   (set-key '(#\C-C #\C-K) 'compile-buffer-command key-map)
   (set-key '(#\C-X #\C-E) 'eval-last-sexp-command key-map)
-  (set-key #\M-O 'find-matching-paren-command key-map))
+  (set-key #\M-O 'find-matching-paren-command key-map)
+  (set-key #\M-FULL_STOP 'find-symbol-at-point-command key-map))
 
 (defun initialize-minibuffer-key-map (key-map)
   (initialize-key-map key-map)
