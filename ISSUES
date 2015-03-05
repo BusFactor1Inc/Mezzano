@@ -91,3 +91,6 @@ allocation during gc.
 
 HPET timer driver. Requires ACPI support to find base address of the HPET.
 
+Virtualbox extensions video driver (resizable main windows?)
+  http://f.osdev.org/viewtopic.php?f=1&t=28766&start=0
+  http://wiki.osdev.org/Bochs_Graphics_Adaptor <- interesting
