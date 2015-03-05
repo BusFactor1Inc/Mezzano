@@ -120,8 +120,8 @@ If the compiled file is out of date, recompile it."
 
 ;; Done.
 
-(setf mezzano.gui.font::*default-font* "OCRA")
-(setf mezzano.gui.font::*default-font-size* 10)
-(setf mezzano.gui.font::*default-monospace-font* "OCRA")
-(setf mezzano.gui.font::*default-monospace-bold-font* "OCRABold")
-(setf mezzano.gui.font::*default-monospace-font-size* 10)
+(eval (read-from-string "(setf mezzano.gui.font::*default-font* \"OCRA\")"))
+(eval (read-from-string "(setf mezzano.gui.font::*default-font-size* 10)"))
+(eval (read-from-string "(setf mezzano.gui.font::*default-monospace-font* \"OCRA\")"))
+(eval (read-from-string "(setf mezzano.gui.font::*default-monospace-bold-font* \"OCRABold\")"))
+(eval (read-from-string "(setf mezzano.gui.font::*default-monospace-font-size* 10)"))
