@@ -177,7 +177,7 @@
 
 (defun repl-main ()
   (let* ((fifo (mezzano.supervisor:make-fifo 50))
-         (window (mezzano.gui.compositor:make-window fifo 640 480))
+         (window (mezzano.gui.compositor:make-window fifo 1024 768))
          (framebuffer (mezzano.gui.compositor:window-buffer window))
          (term (make-instance 'basic-repl
                               :fifo fifo
