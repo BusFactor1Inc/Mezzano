@@ -24,8 +24,18 @@ Editor:
    - Encoding BUG: saving gui/compositor.c caused some sort of encoding problem with
      the pound symbol and another one. had to revert using git. also happens on 
      copywrite symbol in the README.
+
+Snapshots:
+
+  - most embedded systems have (at least) 2 images so that one will
+    always be bootable.  often, doing a snapshot in MZ will fail with
+    OOM.  a solution would be to divide the disk into 2 areas and have
+    a marker for which one to boot.  only until after the snapshot has
+    completed successfully is the marker updated to point to the new
+    image. mabye also update the bootloader to allow for the selection
+    of world images to boot from.
      
-Stop the world GC
+Stop the world GC:
   - how could it be made incremental, concurrent?
   - every allocation holds a mutex. no per-thread nurseries
   - local files are stored in dynamic space and copied on every gc
