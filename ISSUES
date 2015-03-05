@@ -2,6 +2,7 @@ Editor:
    - search for regex (can MZ compile cl-PPCRE?)
    - show-paren-mode like paren matching by bolding the matching paren
    - auto indentation (basic electric newline?)
+   - move-sexp looks like it ignore parens in strings, but not paren characters #\( #\)
    
   - create *Messages* buffer, create function #'message, replace calls to (format t ...) with calls 
     to #'message, insert text into *Messages* in #'messages
