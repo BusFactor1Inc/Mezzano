@@ -2,12 +2,10 @@ Editor:
    - search for regex (can MZ compile cl-PPCRE?)
    - show-paren-mode like paren matching by bolding the matching paren
    - auto indentation (basic electric newline?)
-   - move-sexp looks like it ignore parens in strings, but not paren characters #\( #\)
+   - move-sexp looks like it ignore parens in strings, but not paren characters #\( #\)?
    
-  - create *Messages* buffer, create function #'message, replace calls to (format t ...) with calls 
-    to #'message, insert text into *Messages* in #'messages
-    - would like to create a stream type that will write to a buffer (buffer-stream?), that way format
-      could still be used and one would not have to use a #'message function
+  - create *Messages* buffer
+    - create a stream type that will write to a buffer (buffer-stream)
       -  https://github.com/sbcl/sbcl/blob/master/doc/manual/gray-streams-examples.texinfo
       
   - create a proper minibuffer area for displaying messages and getting input
