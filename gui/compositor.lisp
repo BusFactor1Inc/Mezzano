@@ -521,7 +521,7 @@
                                                 (#\Down-Arrow . #\Down-Arrow)
                                                 (#\Right-Arrow . #\Right-Arrow))))
 
-(defvar *current-keymap* *engb-keymap*)
+(defvar *current-keymap* *enus-keymap*)
 
 (defgeneric convert-scancode-to-key (keymap scancode modifier-state))
 
