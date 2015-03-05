@@ -119,3 +119,9 @@ If the compiled file is out of date, recompile it."
 ;(setf sys.int::*desktop* (eval (read-from-string "(mezzano.gui.desktop:spawn :image \"LOCAL:>Desktop.jpeg\")")))
 
 ;; Done.
+
+(setf mezzano.gui.font::*default-font* "OCRA")
+(setf mezzano.gui.font::*default-font-size* 10)
+(setf mezzano.gui.font::*default-monospace-font* "OCRA")
+(setf mezzano.gui.font::*default-monospace-bold-font* "OCRABold")
+(setf mezzano.gui.font::*default-monospace-font-size* 10)
