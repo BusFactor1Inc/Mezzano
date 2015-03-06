@@ -1,4 +1,6 @@
 Editor:
+   - repl window, so we can have some output scrollback (requires buffer-stream I think)
+   - replace-string, query-replace, replace-regexp
    - search for regex (can MZ compile cl-PPCRE?)
    - show-paren-mode like paren matching by bolding the matching paren
    - auto indentation (basic electric newline?)
@@ -50,7 +52,27 @@ Stop the world GC:
     - follow the guidelines in the c2 wiki page
   - make trimming of cons and general areas optional during gc-cycle
 
+Closette:
+  - defgeneric macro doesn't handle (declare ...) properly
+    - a hack might would be to &allow-other-keys in
+      make-instance-standard-generic-function, but then the
+      decleration would be ignored
+    - a proper fix(?) would be to fix defgeneric to see if the first
+      'option' is a decleration, and if so, put that first in the
+      progn before the call to ensure-generic-function
+    - more proper would be to ensure other calls also do this,
+      defmethod, defclass?
+
 Compiler:
+  - load-time-value is not implemented
+13:37 <Bicyclidine> well, basically if COMPILE runs into
+                    load-time-value it evaluates the form right
+                    then (at compile time)
+13:37 <Bicyclidine> and if COMPILE-FILE runs into it, it makes a
+                    note in the fasl to evaluate this form at load
+                    time, and for the value to show up wherever the
+                    load-time-value call was
+  - optimize pass1.lisp:find-function,find-variable
   - slow and uses a lot of memory so it gc's a lot
   - does it save file/line number information? if not, make it so
   - only single floats supported
