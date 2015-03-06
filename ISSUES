@@ -1,5 +1,4 @@
 Editor:
-   - isearch doesn't cancel with C-g or C-x C-f commands (maybe others)
    - repl window, so we can have some output scrollback (requires buffer-stream I think)
    - replace-string, query-replace, replace-regexp
    - search for regex (can MZ compile cl-PPCRE? NOW IT CAN!)
