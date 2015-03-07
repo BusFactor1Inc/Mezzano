@@ -10,9 +10,8 @@
 (in-package :mezzano.file-system.remote)
 
 (defvar *default-simple-file-port* 2599)
-
-(defvar *read-buffer-size* (* 128 1024))
-(defvar *write-buffer-size* (* 128 1024))
+(defvar *read-cache-size* (* 128 1024))
+(defvar *write-cache-size* (* 128 1024))
 
 (defclass simple-file-host ()
   ((name :initarg :name :reader host-name)
@@ -303,7 +302,7 @@
              (>= (write-buffer-offset stream) (length (write-buffer stream))))
     (flush-write-buffer stream))
   (unless (write-buffer stream)
-    (setf (write-buffer stream) (make-array *write-buffer-size* :element-type '(unsigned-byte 8))
+    (setf (write-buffer stream) (make-array *write-cache-size* :element-type '(unsigned-byte 8))
           (write-buffer-position stream) (sf-position stream)
           (write-buffer-offset stream) 0))
   (setf (aref (write-buffer stream) (write-buffer-offset stream)) byte)
@@ -354,7 +353,7 @@
     (let ((id (read-preserving-whitespace con)))
       (unless (integerp id)
         (error "Read error! ~S" id))
-      (sys.net:buffered-format con "(:READ ~D ~D ~D)~%" id (sf-position stream) *read-buffer-size*)
+      (sys.net:buffered-format con "(:READ ~D ~D ~D)~%" id (sf-position stream) *read-cache-size*)
       (let ((count (read-preserving-whitespace con)))
         (unless (integerp count)
           (error "Read error! ~S" count))

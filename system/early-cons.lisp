@@ -491,12 +491,13 @@
       list
       (cons item list)))
 
-(defun subst (old new tree &key (test #'eql))
+(defun subst (new old tree &key test)
+  (setf test (or test #'eql))
   (cond ((funcall test old tree)
          new)
         ((atom tree) tree)
-        (t (let ((a (subst old new (car tree) :test test))
-                 (d (subst old new (cdr tree) :test test)))
+        (t (let ((a (subst new old (car tree) :test test))
+                 (d (subst new old (cdr tree) :test test)))
              (if (and (funcall test a (car tree))
                       (funcall test d (cdr tree)))
                  tree
