@@ -1,7 +1,7 @@
 Editor:
    - repl window, so we can have some output scrollback (requires buffer-stream I think)
    - replace-string, query-replace, replace-regexp
-   - search for regex (can MZ compile cl-PPCRE? NOW IT CAN!)
+   - search for regex
    - show-paren-mode like paren matching by bolding the matching paren
    - auto indentation (basic electric newline?)
    - move-sexp looks like it ignore parens in strings, but not paren characters #\( #\)?
@@ -24,6 +24,21 @@ Editor:
    - Encoding BUG: saving gui/compositor.c caused some sort of encoding problem with
      the pound symbol and another one. had to revert using git. also happens on 
      copywrite symbol in the README.
+
+GUI:
+   - can't move windows by clicking in the title bar.
+   - can't resize windows with the mouse
+   - no way to switch windows with the keyboard (Alt-Tab?)
+(defun activate-next-window ()
+  (flet ((next-in-list (e l)
+   "Give the next entry after e in the list l, wrapping around."
+   (let ((pos (position e l)))
+     (if (= pos (1- (length l)))
+ (car l)
+ (nth (1+ pos) l)))))
+  (let ((next (next-in-list *active-window* *window-list*)))
+    (activate-window next))))
+   - tiling window manager (port stump?)
 
 Snapshots:
 
@@ -92,21 +107,6 @@ REPL:
 
 When loading an .llf file, the redefinition of each class is asked for.  It
 would be nice to have them all be redefined at once like in CCL.
-
-GUI:
-   - can't move windows by clicking in the title bar.
-   - can't resize windows with the mouse
-   - no way to switch windows with the keyboard (Alt-Tab?)
-(defun activate-next-window ()
-  (flet ((next-in-list (e l)
-   "Give the next entry after e in the list l, wrapping around."
-   (let ((pos (position e l)))
-     (if (= pos (1- (length l)))
- (car l)
- (nth (1+ pos) l)))))
-  (let ((next (next-in-list *active-window* *window-list*)))
-    (activate-window next))))
-   - tiling window manager (port stump?)
 
 Using 'when' casues allocation? Tried to write code using 'when' in gc-cycle in this caused a panic due to 
 allocation during gc.
