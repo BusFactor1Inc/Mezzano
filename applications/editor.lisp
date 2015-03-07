@@ -111,6 +111,7 @@
    (%background-colour :initarg :background-colour :accessor background-colour)
    (%killed-region :initarg :killed-region :accessor killed-region)
    (%global-key-map :initarg :global-key-map :accessor global-key-map)
+   (%pre-command-hooks :initarg :pre-command-hooks :accessor pre-command-hooks)
    (%post-command-hooks :initarg :post-command-hooks :accessor post-command-hooks)
    ;; Redisplay state.
    (%current-screen :initarg :screen :accessor editor-current-screen)
@@ -123,6 +124,7 @@
                      :last-buffer '()
                      :killed-region nil
                      :global-key-map (make-hash-table)
+                     :pre-command-hooks '()
                      :post-command-hooks '()
                      :screen nil
                      :display-line-cache '()))
@@ -1371,7 +1373,6 @@ Returns true when the screen is up-to-date, false if the screen is dirty and the
 (defun find-file-command ()
   (find-file (read-from-minibuffer (format nil "Find file (default ~S): " *default-pathname-defaults*))))
 
-(defvar *save-backup-files* t)
 (defun save-buffer-command ()
   (let ((buffer (current-buffer *editor*)))
     (when (not (buffer-property buffer 'path))
@@ -1379,13 +1380,6 @@ Returns true when the screen is up-to-date, false if the screen is dirty and the
              (filespec (merge-pathnames path)))
         (rename-buffer buffer (file-namestring filespec))
         (setf (buffer-property buffer 'path) filespec)))
-    ;; Make a backup of the file before writing, if it already exists
-    (when (and *save-backup-files*
-               (probe-file (buffer-property buffer 'path)))
-      (rename-file (buffer-property buffer 'path)
-                   (pathname (concatenate 'string
-                                          (namestring (buffer-property buffer 'path))
-                                          "~"))))
     (with-open-file (s (buffer-property buffer 'path)
                        :direction :output
                        :if-exists :new-version
@@ -1526,6 +1520,7 @@ and mark."
       (buffer-string buffer point (buffer-point buffer)))))
 
 (defun search-forward (buffer string)
+  "From point, search forwards for string in buffer."
   (let ((point (copy-mark (buffer-point buffer))))
     ;; Search to the end of the buffer
     (save-excursion (buffer)
@@ -1590,6 +1585,7 @@ If no such form is found, then return the CL-USER package."
 (defun beginning-of-top-level-form-command ()
   (beginning-of-top-level-form (current-buffer *editor*)))
 
+<<<<<<< HEAD
 (defun newline-command ()
   (insert (current-buffer *editor*)  "
 "))
@@ -1667,6 +1663,24 @@ If no such form is found, then return the CL-USER package."
                  (remove 'isearch-post-command-hook 
                           (post-command-hooks *editor*))))
          (char-at-point (point)
+=======
+(defvar *isearch-string* (make-array 0 :fill-pointer t))
+(defvar *last-isearch-string* *isearch-string*)
+
+(defun cancel-isearch ()
+  (format t "Cancelling isearch.~%")
+  (setf (pre-command-hooks *editor*)
+        (remove 'isearch-pre-command-hook (pre-command-hooks *editor*)))
+  (setf (post-command-hooks *editor*)
+        (remove 'isearch-post-command-hook (post-command-hooks *editor*))))
+
+(defun isearch-pre-command-hook ()
+  (unless (or (eq *this-command* 'self-insert-command)
+              (eq *this-command* 'isearch-command))
+    (cancel-isearch)))
+  
+(defun isearch-post-command-hook ()
+  (flet ((char-at-point (point)
            (line-character (mark-line point) (mark-charpos point))))
     (let* ((buffer (current-buffer *editor*))
            (point (buffer-point buffer)))
@@ -1701,6 +1715,7 @@ If no such form is found, then return the CL-USER package."
       (setf *last-isearch-string* *isearch-string*))
     (format t "Starting isearch (Default: ~S)...~%" (coerce *last-isearch-string* 'string))
     (setf *isearch-string* nil)
+    (push 'isearch-pre-command-hook (pre-command-hooks *editor*))
     (push 'isearch-post-command-hook (post-command-hooks *editor*))))
 
 (defun find-symbol-at-point-command ()
@@ -1732,11 +1747,13 @@ If no such form is found, then return the CL-USER package."
                  (when (not (hash-table-p *this-command*))
                    (setf *this-chord* (reverse *this-chord*))
                    (cond (*this-command*
+                          (mapc 'funcall (pre-command-hooks *editor*))
                           (funcall *this-command*)
                           (mapc 'funcall (post-command-hooks *editor*)))
                          (t (format t "Unknown command ~S~%" *this-chord*)))
                    (return))))
              (*this-command*
+              (mapc 'funcall (pre-command-hooks *editor*))
               (funcall *this-command*)
               (mapc 'funcall (post-command-hooks *editor*)))
              (t (format t "Unknown command ~S~%" *this-character*)))
