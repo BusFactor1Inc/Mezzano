@@ -1656,17 +1656,6 @@ If no such form is found, then return the CL-USER package."
 (defvar *isearch-string* (make-array 0 :fill-pointer t))
 (defvar *last-isearch-string* *isearch-string*)
 
-(defun isearch-post-command-hook ()
-  (flet ((cancel-isearch ()
-           (format t "Cancelling isearch.~%")
-           (setf (post-command-hooks *editor*)
-                 (remove 'isearch-post-command-hook 
-                          (post-command-hooks *editor*))))
-         (char-at-point (point)
-=======
-(defvar *isearch-string* (make-array 0 :fill-pointer t))
-(defvar *last-isearch-string* *isearch-string*)
-
 (defun cancel-isearch ()
   (format t "Cancelling isearch.~%")
   (setf (pre-command-hooks *editor*)
