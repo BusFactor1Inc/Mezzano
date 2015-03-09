@@ -73,12 +73,12 @@ directory created above.
 The desktop image can be disabled by removing the :IMAGE argument from line 122
 and by removing the copy-file call on line 87.
 
-Build a cold image.
-(cold-generator::make-image "mezzano" :header-path "tools/disk_header")
+Build a cold image capable of running with up to 4G of RAM.
+(cold-generator::make-image "mezzano" :header-path "tools/disk_header" :image-size (* 4 1024 1024 1024))
 
 This will produce a raw disk image called mezzano.image in the current directory.
 The disk image can be run directly in qemu:
-  qemu-system-x86_64 -hda mezzano.image -m 512 -vga std -serial stdio -net user -net nic,model=virtio
+  qemu-system-x86_64 -hda mezzano.image -m 4096 -vga std -serial stdio -net user -net nic,model=virtio
 or it can be converted to a .vmdk for use in VirtualBox:
   VBoxManage convertfromraw --format vmdk mezzano.image mezzano.vmdk
 
