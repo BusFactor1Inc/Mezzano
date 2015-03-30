@@ -33,15 +33,15 @@
 (defstruct (disk-request
              (:constructor make-disk-request ())
              (:area :wired))
-  (state :error :type (member :waiting :in-progress :complete :error))
+  (state :error :type (member :setup :waiting :in-progress :complete :error))
   (error-reason :uninitialized)
   disk
   direction
   lba
   n-sectors
   buffer
-  (lock (make-mutex "Disk request lock" :spin))
-  (cvar (make-condition-variable "Disk request notifier"))
+  (lock (place-spinlock-initializer))
+  (latch (make-latch "Disk request notifier"))
   next)
 
 (defvar *disks*)
@@ -49,7 +49,7 @@
 (defvar *disk-request-current*)
 (defvar *disk-request-queue-head*)
 (defvar *disk-request-queue-lock*)
-(defvar *disk-request-queue-cvar*)
+(defvar *disk-request-queue-latch*)
 
 (defun all-disks ()
   ;; Would be nice to copy the list here, but this is called before the paging disk
@@ -73,20 +73,20 @@
     (setf *log-disk-requests* nil)
     (setf *disk-request-current* nil
           *disk-request-queue-head* nil
-          *disk-request-queue-lock* (make-mutex "Disk request queue lock" :spin)
-          *disk-request-queue-cvar* (make-condition-variable "Disk request queue notifier")
+          *disk-request-queue-lock* (place-spinlock-initializer)
+          *disk-request-queue-latch* (make-latch "Disk request queue notifier")
           *disks* '()))
   ;; Abort any queued or in-progress requests.
   (do ((request *disk-request-queue-head* (disk-request-next request)))
       ((null request))
     (setf (disk-request-state request) :error
           (disk-request-error-reason request) :system-reinitialized)
-    (condition-notify (disk-request-cvar request) t))
+    (latch-trigger (disk-request-latch request)))
   (setf *disk-request-queue-head* nil)
   (when *disk-request-current*
     (setf (disk-request-state *disk-request-current*) :error
           (disk-request-error-reason *disk-request-current*) :system-reinitialized)
-    (condition-notify (disk-request-cvar *disk-request-current*) t)
+    (latch-trigger (disk-request-latch *disk-request-current*))
     (setf *disk-request-current* nil))
   ;; Clear the disk list.
   (dolist (disk *disks*)
@@ -142,16 +142,18 @@
       (release-physical-pages page (ceiling sector-size +4k-page-size+)))))
 
 (defun pop-disk-request ()
-  (with-mutex (*disk-request-queue-lock*)
-    (loop
-       (let ((req *disk-request-queue-head*))
-         (when req
-           (with-mutex ((disk-request-lock req))
-             (setf (disk-request-state req) :in-progress
-                   *disk-request-current* req)
-             (setf *disk-request-queue-head* (disk-request-next req)))
-           (return req)))
-       (condition-wait *disk-request-queue-cvar* *disk-request-queue-lock*))))
+  (loop
+     (without-interrupts
+       (with-symbol-spinlock (*disk-request-queue-lock*)
+         (let ((req *disk-request-queue-head*))
+           (when req
+             (with-place-spinlock ((disk-request-lock req))
+               (setf (disk-request-state req) :in-progress
+                     *disk-request-current* req)
+               (setf *disk-request-queue-head* (disk-request-next req)))
+             (return req)))
+         (latch-reset *disk-request-queue-latch*)))
+     (latch-wait *disk-request-queue-latch*)))
 
 (defun disk-thread ()
   (loop
@@ -177,15 +179,16 @@
                     ;; FIXME: Deal with n-sectors > disk max-sectors.
                     (disk-request-n-sectors request)
                     (disk-request-buffer request))
-         (with-mutex ((disk-request-lock request))
-           (cond (successp
-                  (setf (disk-request-state request) :complete
-                        (disk-request-error-reason request) nil))
-                 (t
-                  (setf (disk-request-state request) :error
-                        (disk-request-error-reason request) reason)))
-           (setf *disk-request-current* nil)
-           (condition-notify (disk-request-cvar request) t)))
+         (without-interrupts
+           (with-place-spinlock ((disk-request-lock request))
+             (cond (successp
+                    (setf (disk-request-state request) :complete
+                          (disk-request-error-reason request) nil))
+                   (t
+                    (setf (disk-request-state request) :error
+                          (disk-request-error-reason request) reason)))
+             (setf *disk-request-current* nil)
+             (latch-trigger (disk-request-latch request)))))
        (case (disk-request-direction request)
          (:read (set-disk-read-light nil))
          (:write (set-disk-write-light nil))))))
@@ -210,28 +213,46 @@ Returns true on success; false on failure."
   ;; Wonder if these should fail async...
   (check-type direction (member :read :write))
   (assert (<= 0 lba (+ lba n-sectors) (1- (disk-n-sectors disk))))
-  (with-mutex (*disk-request-queue-lock*)
-    (with-mutex ((disk-request-lock request))
-      (let ((state (disk-request-state request)))
-        (when (or (eql state :in-progress) (eql state :waiting))
-          ;; Bad! Request has already been submitted, no resubmitting.
-          (return-from disk-submit-request-1 nil)))
-      (setf (disk-request-state request) :waiting
-            (disk-request-disk request) disk
-            (disk-request-direction request) direction
-            (disk-request-lba request) lba
-            (disk-request-n-sectors request) n-sectors
-            (disk-request-buffer request) buffer)
-      (when (not (disk-valid disk))
-        (setf (disk-request-state request) :error
-              (disk-request-error-reason request) :system-reinitialized)
-        (return-from disk-submit-request-1 t))
-      ;; Attach to request list.
-      (setf (disk-request-next request) *disk-request-queue-head*
-            *disk-request-queue-head* request)
-      ;; Wake the disk thread.
-      (condition-notify *disk-request-queue-cvar*)))
-  ;; All good.
+  ;; This terrible nonsense is because SAFE-WITHOUT-INTERRUPTS
+  ;; can't pass more than 3 arguments to the lambda.
+  ;; Check if the request has already been submitted.
+  (when (safe-without-interrupts (request)
+          (with-place-spinlock ((disk-request-lock request))
+            (let ((state (disk-request-state request)))
+              (case state
+                ((:in-progress :waiting :setup)
+                 t)
+                (nil
+                 ;; Transition to setup phase. This effectively locks the request,
+                 ;; preventing anything else from modifying it.
+                 (setf (disk-request-state request) :setup)
+                 nil)))))
+    ;; Request is already active.
+    (return-from disk-submit-request-1 nil))
+  ;; Setup.
+  ;; Safe to do with interrupts enabled because the request is in :SETUP.
+  (setf (disk-request-disk request) disk
+        (disk-request-direction request) direction
+        (disk-request-lba request) lba
+        (disk-request-n-sectors request) n-sectors
+        (disk-request-buffer request) buffer)
+  ;; Now submit.
+  (safe-without-interrupts (request disk)
+    (with-symbol-spinlock (*disk-request-queue-lock*)
+      (with-place-spinlock ((disk-request-lock request))
+        (setf (disk-request-state request) :waiting)
+        (latch-reset (disk-request-latch request))
+        (cond ((disk-valid disk)
+               ;; Attach to request list.
+               (setf (disk-request-next request) *disk-request-queue-head*
+                     *disk-request-queue-head* request)
+               ;; Wake the disk thread.
+               (latch-trigger *disk-request-queue-latch*))
+              (t
+               (latch-trigger (disk-request-latch request))
+               (setf (disk-request-state request) :error
+                     (disk-request-error-reason request) :system-reinitialized))))))
+  ;; All done.
   t)
 
 (defun disk-submit-request (request disk direction lba n-sectors buffer)
@@ -248,35 +269,35 @@ been freshly allocated."
   "Cancel a disk request.
 If the request has completed or is freshly allocated, then it is not cancelled.
 An in-progress request may be cancelled, or it may complete."
-  (with-mutex (*disk-request-queue-lock*)
-    (with-mutex ((disk-request-lock request))
-      ;; Easy case, just remove it from the queue.
-      ;; Cancelling an in-progress request is trickier.
-      (when (eql (disk-request-state request) :waiting)
-        (cond ((eql request *disk-request-queue-head*)
-               (setf *disk-request-queue-head* (disk-request-next request)))
-              (t (do ((prev *disk-request-queue-head* (disk-request-next prev)))
-                     ((null prev))
-                   (when (eql (disk-request-next prev) request)
-                     (setf (disk-request-next prev) (disk-request-next request))))))
-        (setf (disk-request-state request) :error
-              (disk-request-error-reason request) reason)
-        (condition-notify (disk-request-cvar request) t)))))
+  (without-interrupts
+    (with-symbol-spinlock (*disk-request-queue-lock*)
+      (with-place-spinlock ((disk-request-lock request))
+        ;; Easy case, just remove it from the queue.
+        ;; Cancelling an in-progress request is trickier.
+        (when (eql (disk-request-state request) :waiting)
+          (cond ((eql request *disk-request-queue-head*)
+                 (setf *disk-request-queue-head* (disk-request-next request)))
+                (t (do ((prev *disk-request-queue-head* (disk-request-next prev)))
+                       ((null prev))
+                     (when (eql (disk-request-next prev) request)
+                       (setf (disk-request-next prev) (disk-request-next request))))))
+          (setf (disk-request-state request) :error
+                (disk-request-error-reason request) reason)
+          (latch-trigger (disk-request-latch request)))))))
 
 (defun disk-await-request (request)
   "Wait for REQUEST to complete. Returns true if the request succeeded; false on failure.
 Second value is the failure reason."
-  (with-mutex ((disk-request-lock request))
-    (loop
-       (case (disk-request-state request)
-         (:complete
-          (return t))
-         (:error
-          (return (values nil (disk-request-error-reason request)))))
-       (condition-wait (disk-request-cvar request) (disk-request-lock request)))))
+  (latch-wait (disk-request-latch request))
+  (case (disk-request-state request)
+    (:complete
+     t)
+    (:error
+     (values nil (disk-request-error-reason request)))))
 
 (defun disk-request-complete-p (request)
   "Test if REQUEST has completed. Use DISK-AWAIT-REQUEST to retrieve more detailed information."
-  (with-mutex ((disk-request-lock request))
-    (let ((state (disk-request-state request)))
-      (or (eql state :complete) (eql state :error)))))
+  (without-interrupts
+    (with-place-spinlock ((disk-request-lock request))
+      (let ((state (disk-request-state request)))
+        (or (eql state :complete) (eql state :error))))))

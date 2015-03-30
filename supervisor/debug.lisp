@@ -61,17 +61,20 @@
          (debug-write-fixnum-1 fixnum base))
         (t (debug-write-char #\0))))
 
+(defun debug-write (thing)
+  (cond ((sys.int::character-array-p thing)
+         (debug-write-string thing))
+        ((symbolp thing)
+         (debug-write-string (symbol-name thing)))
+        ((sys.int::fixnump thing)
+         (debug-write-fixnum thing))
+        (t (debug-write-string "#<")
+           (debug-write-fixnum (sys.int::lisp-object-address thing))
+           (debug-write-string ">"))))
+
 (defun debug-print-line-1 (things)
   (dolist (thing things)
-    (cond ((sys.int::character-array-p thing)
-           (debug-write-string thing))
-          ((symbolp thing)
-           (debug-write-string (symbol-name thing)))
-          ((sys.int::fixnump thing)
-           (debug-write-fixnum thing))
-          (t (debug-write-string "#<")
-             (debug-write-fixnum (sys.int::lisp-object-address thing))
-             (debug-write-string ">"))))
+    (debug-write thing))
   (when (boundp '*debug-pseudostream*)
     (funcall *debug-pseudostream* :write-char #\Newline)
     (funcall *debug-pseudostream* :force-output)))
@@ -90,25 +93,103 @@
 
 (defvar *panic-in-progress* nil)
 
+(defun panic-print-backtrace (initial-frame-pointer)
+  (let ((*pagefault-hook* (dx-lambda (&rest stuff)
+                            (declare (ignore stuff))
+                            (debug-print-line "#<truncated>")
+                            (return-from panic-print-backtrace))))
+    (do ((fp initial-frame-pointer
+             (sys.int::memref-signed-byte-64 fp 0)))
+        ((eql fp 0))
+      (let ((return-address (sys.int::memref-signed-byte-64 fp 1)))
+        (when (eql return-address 0)
+          (return))
+        (debug-write fp)
+        (debug-write-char #\Space)
+        (debug-write return-address)
+        (debug-write-char #\Space)
+        ;; Writing the name itself is fraught with danger. Print it in a seperate
+        ;; call from the frame-pointer & return address so that a page-fault
+        ;; won't abort the whole entry.
+        (block nil
+          (let* ((*pagefault-hook* (dx-lambda (&rest stuff)
+                                     (declare (ignore stuff))
+                                     (debug-write-string "#<unknown>")
+                                     (return)))
+                 (function (sys.int::return-address-to-function return-address))
+                 (info (sys.int::%array-like-ref-t function -1))
+                 ;; First entry in the constant pool.
+                 (address (logand (sys.int::lisp-object-address function) -16))
+                 (name (sys.int::memref-t address (* (ldb (byte 16 (- 16 sys.int::+n-fixnum-bits+)) info) 2))))
+            (debug-write name)))
+        (debug-print-line)))))
+
 (defun panic (&rest things)
   (declare (dynamic-extent things))
+  (panic-1 things nil))
+
+(defun panic-1 (things extra)
+  (sys.int::%cli)
   (when (and (boundp '*panic-in-progress*)
              *panic-in-progress*)
-    (sys.int::%cli)
     (loop (sys.int::%hlt)))
   ;; Stop the world, just in case printing the backtrace requires paging stuff in.
   (setf *world-stopper* (current-thread)
         *panic-in-progress* t)
+  (when (eql *debug-pseudostream* 'debug-serial-stream)
+    (setf *debug-pseudostream* 'debug-early-serial-stream))
   (set-panic-light)
-  (sys.int::%sti)
   (debug-print-line-1 things)
-  (do ((i 0 (1+ i))
-       (fp (sys.int::read-frame-pointer)
-           (sys.int::memref-unsigned-byte-64 fp 0)))
-      ((eql fp 0))
-    (debug-print-line fp " " (sys.int::memref-unsigned-byte-64 fp 1)))
+  (when extra
+    (funcall extra))
+  (panic-print-backtrace (sys.int::read-frame-pointer))
   (loop (sys.int::%hlt)))
 
 (defmacro ensure (condition &rest things)
+  "A simple supervisor-safe ASSERT-like macro."
   `(when (not ,condition)
      (panic ,@things)))
+
+(in-package :sys.int)
+
+(defstruct (cold-stream (:area :wired)))
+
+(in-package :mezzano.supervisor)
+
+(defvar *cold-unread-char*)
+
+(defun sys.int::cold-write-char (c stream)
+  (declare (ignore stream))
+  (debug-write-char c))
+
+(defun sys.int::cold-start-line-p (stream)
+  (declare (ignore stream))
+  (debug-start-line-p))
+
+(defun sys.int::cold-read-char (stream)
+  (declare (ignore stream))
+  (cond (*cold-unread-char*
+         (prog1 *cold-unread-char*
+           (setf *cold-unread-char* nil)))
+        (t (debug-read-char))))
+
+(defun sys.int::cold-unread-char (character stream)
+  (declare (ignore stream))
+  (when *cold-unread-char*
+    (error "Multiple unread-char!"))
+  (setf *cold-unread-char* character))
+
+;;; Early error functions, replaced later as part of cold load.
+
+(defun sys.int::assert-error (test-form datum &rest arguments)
+  (declare (dynamic-extent arguments))
+  (panic "Assert error " datum " " arguments))
+
+(defun sys.int::raise-undefined-function (fref)
+  (let ((name (sys.int::%array-like-ref-t fref sys.int::+fref-name+)))
+    (cond ((consp name)
+           (panic "Undefined function (" (symbol-name (car name)) " " (symbol-name (car (cdr name))) ")"))
+          (t (panic "Undefined function " (symbol-name name))))))
+
+(defun sys.int::raise-unbound-error (symbol)
+  (panic "Unbound symbol " (symbol-name symbol)))

@@ -146,7 +146,6 @@
   (:use :cross-cl)
   (:export #:current-thread
            #:with-symbol-spinlock
-           #:with-gc-deferred
            #:with-pseudo-atomic
            #:without-interrupts
            #:with-world-stopped
@@ -157,28 +156,59 @@
            #:thread-state
            #:thread-lock
            #:thread-stack
-           #:thread-stack-pointer
            #:thread-wait-item
            #:thread-special-stack-pointer
-           #:thread-preemption-disable-depth
-           #:thread-preemption-pending
+           #:thread-full-save-p
            #:thread-%next
            #:thread-%prev
-           #:thread-foothold-disable-depth
-           #:thread-frame-pointer
+           #:thread-pending-footholds
            #:thread-mutex-stack
            #:thread-global-next
            #:thread-global-prev
+           #:thread-state-r15
+           #:thread-state-r14
+           #:thread-state-r13
+           #:thread-state-r13-value
+           #:thread-state-r12
+           #:thread-state-r12-value
+           #:thread-state-r11
+           #:thread-state-r11-value
+           #:thread-state-r10
+           #:thread-state-r10-value
+           #:thread-state-r9
+           #:thread-state-r9-value
+           #:thread-state-r8
+           #:thread-state-r8-value
+           #:thread-state-rdi
+           #:thread-state-rsi
+           #:thread-state-rbx
+           #:thread-state-rbx-value
+           #:thread-state-rdx
+           #:thread-state-rdx-value
+           #:thread-state-rcx
+           #:thread-state-rcx-value
+           #:thread-state-rax
+           #:thread-state-rax-value
+           #:thread-state-rbp
+           #:thread-frame-pointer
+           #:thread-state-rip
+           #:thread-state-cs
+           #:thread-state-rflags
+           #:thread-state-rsp
+           #:thread-stack-pointer
+           #:thread-state-ss
            #:thread-yield
            #:all-threads
+           #:without-footholds
            #:establish-thread-foothold
-           #:destroy-thread
+           #:terminate-thread
            #:make-mutex
            #:with-mutex
            #:make-condition-variable
            #:condition-wait
            #:condition-notify
            #:snapshot
+           #:allocate-memory-range
            #:protect-memory-range
            #:release-memory-range
            #:compact-block-freelist
@@ -194,6 +224,7 @@
            #:remove-boot-hook
            #:fetch-boot-modules
            #:store-statistics
+           #:physical-memory-statistics
 
            ;; Temporary drivers.
            #:ps/2-key-read

@@ -60,6 +60,14 @@
                  (> freelist (+ prev (* (freelist-entry-size prev) 8)))))
       (mezzano.supervisor:panic "Corrupt freelist."))))
 
+(defun set-allocated-object-header (address tag data mark-bit)
+  ;; Be careful to avoid bignum consing here. Some functions can have a
+  ;; data value larger than a fixnum when shifted.
+  (setf (sys.int::memref-unsigned-byte-32 address 0) (logior mark-bit
+                                                             (ash tag sys.int::+array-type-shift+)
+                                                             (ash (ldb (byte (- 32 sys.int::+array-length-shift+) 0) data) sys.int::+array-length-shift+))
+        (sys.int::memref-unsigned-byte-32 address 1) (ldb (byte 32 (- 32 sys.int::+array-length-shift+)) data)))
+
 ;;; FIXME: The pinned/general/cons allocators must somehow initialize their objects with the
 ;;; allocator lock released. taking a pagefault with it taken is bad, as it will cause
 ;;; IRQs to be reenabled. What to do? Make it a mutex? actaully reasonable, but a bit heavy?
@@ -97,10 +105,7 @@
                 (t
                  (setf (symbol-value freelist-symbol) next))))
         ;; Write object header.
-        (setf (sys.int::memref-unsigned-byte-64 freelist 0)
-              (logior sys.int::*pinned-mark-bit*
-                      (ash tag sys.int::+array-type-shift+)
-                      (ash data sys.int::+array-length-shift+)))
+        (set-allocated-object-header freelist tag data sys.int::*pinned-mark-bit*)
         ;; Clear data.
         (dotimes (i (1- words))
           (setf (sys.int::memref-unsigned-byte-64 freelist (1+ i)) 0))
@@ -115,79 +120,75 @@
       (incf words))
     (ecase area
       ((nil)
-       (tagbody
-        OUTER-LOOP
-          (mezzano.supervisor:with-mutex (*allocator-lock*)
-            (tagbody
-             INNER-LOOP
-               (return-from %allocate-object
-                 (mezzano.supervisor:with-pseudo-atomic
-                   (when (> (+ sys.int::*general-area-bump* (* words 8)) sys.int::*general-area-limit*)
-                     (go EXPAND-AREA))
-                   ;; Enough size, allocate here.
-                   (let ((addr (logior (ash sys.int::+address-tag-general+ sys.int::+address-tag-shift+)
-                                       sys.int::*general-area-bump*
-                                       sys.int::*dynamic-mark-bit*)))
-                     (incf sys.int::*general-area-bump* (* words 8))
-                     ;; Write array header.
-                     (setf (sys.int::memref-unsigned-byte-64 addr 0)
-                           (logior (ash tag sys.int::+array-type-shift+)
-                                   (ash data sys.int::+array-length-shift+)))
-                     (sys.int::%%assemble-value addr sys.int::+tag-object+))))
-             EXPAND-AREA
-               ;; No memory. If there's memory available, then expand the area, otherwise run the GC.
-               ;; Cannot be done when pseudo-atomic.
-               ;; Divide granularity by two because this is a semispace area. Need twice as much memory.
-               (let ((expansion (logand (truncate *general-area-expansion-granularity* 2) (lognot #xFFF))))
-                 (mezzano.supervisor::debug-print-line "Expanding general area by " expansion)
-                 (when (< sys.int::*memory-expansion-remaining* (* expansion 2))
-                   ;; Not enough memory, abandon ship, do a gc and then attempt the allocation again.
-                   (go DO-GC))
-                 (decf sys.int::*memory-expansion-remaining* (* expansion 2))
-                 ;; Do new & oldspace allocations seperately, this interacts better with the freelist.
-                 (mezzano.supervisor:with-mutex (mezzano.supervisor::*vm-lock*)
-                   ;; Allocate newspace.
-                   (dotimes (i (truncate expansion #x1000))
-                     (mezzano.supervisor::allocate-new-block-for-virtual-address
-                      (logior sys.int::*dynamic-mark-bit*
-                              (ash sys.int::+address-tag-general+
-                                   sys.int::+address-tag-shift+)
-                              (+ sys.int::*general-area-limit*
-                                 (* i #x1000)))
-                      (logior sys.int::+block-map-present+
-                              sys.int::+block-map-writable+
-                              sys.int::+block-map-zero-fill+)))
-                   ;; Allocate oldspace.
-                   (dotimes (i (truncate expansion #x1000))
-                     (mezzano.supervisor::allocate-new-block-for-virtual-address
-                      (logior (logxor sys.int::*dynamic-mark-bit*
-                                      (ash 1 sys.int::+address-mark-bit+))
-                              (ash sys.int::+address-tag-general+
-                                   sys.int::+address-tag-shift+)
-                              (+ sys.int::*general-area-limit*
-                                 (* i #x1000)))
-                      sys.int::+block-map-zero-fill+)))
-                 (incf sys.int::*general-area-limit* expansion))
-               (go INNER-LOOP)))
-        DO-GC
-          ;; Must occur outside the locks.
-          (sys.int::gc)
-          (go OUTER-LOOP)))
+       (mezzano.supervisor:without-footholds
+         (tagbody
+          OUTER-LOOP
+            (mezzano.supervisor:with-mutex (*allocator-lock*)
+              (tagbody
+               INNER-LOOP
+                 (return-from %allocate-object
+                   (mezzano.supervisor:with-pseudo-atomic
+                     (when (> (+ sys.int::*general-area-bump* (* words 8)) sys.int::*general-area-limit*)
+                       (go EXPAND-AREA))
+                     ;; Enough size, allocate here.
+                     (let ((addr (logior (ash sys.int::+address-tag-general+ sys.int::+address-tag-shift+)
+                                         sys.int::*general-area-bump*
+                                         sys.int::*dynamic-mark-bit*)))
+                       (incf sys.int::*general-area-bump* (* words 8))
+                       ;; Write array header.
+                       (set-allocated-object-header addr tag data 0)
+                       (sys.int::%%assemble-value addr sys.int::+tag-object+))))
+               EXPAND-AREA
+                 ;; No memory. If there's memory available, then expand the area, otherwise run the GC.
+                 ;; Cannot be done when pseudo-atomic.
+                 ;; Divide granularity by two because this is a semispace area. Need twice as much memory.
+                 (let ((expansion (logand (truncate *general-area-expansion-granularity* 2) (lognot #xFFF))))
+                   (mezzano.supervisor::debug-print-line "Expanding general area by " expansion)
+                   (when (< sys.int::*memory-expansion-remaining* (* expansion 2))
+                     ;; Not enough memory, abandon ship, do a gc and then attempt the allocation again.
+                     (go DO-GC))
+                   (decf sys.int::*memory-expansion-remaining* (* expansion 2))
+                   ;; Do new & oldspace allocations seperately, this interacts better with the freelist.
+                   (mezzano.supervisor:allocate-memory-range
+                    (logior sys.int::*dynamic-mark-bit*
+                            (ash sys.int::+address-tag-general+
+                                 sys.int::+address-tag-shift+)
+                            sys.int::*general-area-limit*)
+                    expansion
+                    (logior sys.int::+block-map-present+
+                            sys.int::+block-map-writable+
+                            sys.int::+block-map-zero-fill+))
+                   (mezzano.supervisor:allocate-memory-range
+                    (logior (logxor sys.int::*dynamic-mark-bit*
+                                    (ash 1 sys.int::+address-mark-bit+))
+                            (ash sys.int::+address-tag-general+
+                                 sys.int::+address-tag-shift+)
+                            sys.int::*general-area-limit*)
+                    expansion
+                    sys.int::+block-map-zero-fill+)
+                   (incf sys.int::*general-area-limit* expansion))
+                 (go INNER-LOOP)))
+          DO-GC
+            ;; Must occur outside the locks.
+            (sys.int::gc)
+            (go OUTER-LOOP))))
       (:pinned
-       (mezzano.supervisor:with-mutex (*allocator-lock*)
-         (mezzano.supervisor:with-pseudo-atomic
-           (when *paranoid-allocation*
-             (verify-freelist sys.int::*pinned-area-freelist* (* 2 1024 1024 1024) sys.int::*pinned-area-bump*))
-           (sys.int::%%assemble-value
-            (%allocate-from-pinned-area tag data words 'sys.int::*pinned-area-freelist*)
-            sys.int::+tag-object+))))
+       (mezzano.supervisor:without-footholds
+         (mezzano.supervisor:with-mutex (*allocator-lock*)
+           (mezzano.supervisor:with-pseudo-atomic
+             (when *paranoid-allocation*
+               (verify-freelist sys.int::*pinned-area-freelist* (* 2 1024 1024 1024) sys.int::*pinned-area-bump*))
+             (sys.int::%%assemble-value
+              (%allocate-from-pinned-area tag data words 'sys.int::*pinned-area-freelist*)
+              sys.int::+tag-object+)))))
       (:wired
-       (mezzano.supervisor:with-symbol-spinlock (*wired-allocator-lock*)
-         (when *paranoid-allocation*
-           (verify-freelist sys.int::*wired-area-freelist* (* 2 1024 1024) sys.int::*wired-area-bump*))
-         (sys.int::%%assemble-value
-          (%allocate-from-pinned-area tag data words 'sys.int::*wired-area-freelist*)
-          sys.int::+tag-object+))))))
+       (mezzano.supervisor::safe-without-interrupts (tag data words)
+         (mezzano.supervisor:with-symbol-spinlock (*wired-allocator-lock*)
+           (when *paranoid-allocation*
+             (verify-freelist sys.int::*wired-area-freelist* (* 2 1024 1024) sys.int::*wired-area-bump*))
+           (sys.int::%%assemble-value
+            (%allocate-from-pinned-area tag data words 'sys.int::*wired-area-freelist*)
+            sys.int::+tag-object+)))))))
 
 (defun sys.int::cons-in-area (car cdr &optional area)
   (when sys.int::*gc-in-progress*
@@ -195,87 +196,87 @@
   (ecase area
     ((nil) (cons car cdr))
     (:pinned
-     (mezzano.supervisor:with-mutex (*allocator-lock*)
-       (mezzano.supervisor:with-pseudo-atomic
+     (mezzano.supervisor:without-footholds
+       (mezzano.supervisor:with-mutex (*allocator-lock*)
+         (mezzano.supervisor:with-pseudo-atomic
+           (when *paranoid-allocation*
+             (verify-freelist sys.int::*pinned-area-freelist* (* 2 1024 1024 1024) sys.int::*pinned-area-bump*))
+           (let ((val (sys.int::%%assemble-value
+                       (+ (%allocate-from-pinned-area sys.int::+object-tag-cons+ 0 4 'sys.int::*pinned-area-freelist*) 16)
+                       sys.int::+tag-cons+)))
+             (setf (car val) car
+                   (cdr val) cdr)
+             val)))))
+    (:wired
+     (mezzano.supervisor::safe-without-interrupts (car cdr)
+       (mezzano.supervisor:with-symbol-spinlock (*wired-allocator-lock*)
          (when *paranoid-allocation*
-           (verify-freelist sys.int::*pinned-area-freelist* (* 2 1024 1024 1024) sys.int::*pinned-area-bump*))
+           (verify-freelist sys.int::*wired-area-freelist* (* 2 1024 1024) sys.int::*wired-area-bump*))
          (let ((val (sys.int::%%assemble-value
-                     (+ (%allocate-from-pinned-area sys.int::+object-tag-cons+ 0 4 'sys.int::*pinned-area-freelist*) 16)
+                     (+ (%allocate-from-pinned-area sys.int::+object-tag-cons+ 0 4 'sys.int::*wired-area-freelist*) 16)
                      sys.int::+tag-cons+)))
            (setf (car val) car
                  (cdr val) cdr)
-           val))))
-    (:wired
-     (mezzano.supervisor:with-symbol-spinlock (*wired-allocator-lock*)
-       (when *paranoid-allocation*
-         (verify-freelist sys.int::*wired-area-freelist* (* 2 1024 1024) sys.int::*wired-area-bump*))
-       (let ((val (sys.int::%%assemble-value
-                   (+ (%allocate-from-pinned-area sys.int::+object-tag-cons+ 0 4 'sys.int::*wired-area-freelist*) 16)
-                   sys.int::+tag-cons+)))
-         (setf (car val) car
-               (cdr val) cdr)
-         val)))))
+           val))))))
 
 (defun cons (car cdr)
   (when sys.int::*gc-in-progress*
     (mezzano.supervisor:panic "Allocating during GC!"))
-  (tagbody
-   OUTER-LOOP
-     (mezzano.supervisor:with-mutex (*allocator-lock*)
-       (tagbody
-        INNER-LOOP
-          (return-from cons
-            (mezzano.supervisor:with-pseudo-atomic
-              (when (> (+ sys.int::*cons-area-bump* 16) sys.int::*cons-area-limit*)
-                (go EXPAND-AREA))
-              ;; Enough size, allocate here.
-              (let* ((addr (logior (ash sys.int::+address-tag-cons+ sys.int::+address-tag-shift+)
-                                   sys.int::*cons-area-bump*
-                                   sys.int::*dynamic-mark-bit*))
-                     (val (sys.int::%%assemble-value addr sys.int::+tag-cons+)))
-                (incf sys.int::*cons-area-bump* 16)
-                (setf (car val) car
-                      (cdr val) cdr)
-                val)))
-        EXPAND-AREA
-          ;; No memory. If there's memory available, then expand the area, otherwise run the GC.
-          ;; Cannot be done when pseudo-atomic.
-          ;; Divide granularity by two because this is a semispace area. Need twice as much memory.
-          (let ((expansion (logand (truncate *cons-area-expansion-granularity* 2) (lognot #xFFF))))
-            (mezzano.supervisor::debug-print-line "Expanding cons area by " expansion)
-            (when (< sys.int::*memory-expansion-remaining* (* expansion 2))
-              ;; Not enough memory, abandon ship, do a gc and then attempt the allocation again.
-              (go DO-GC))
-            (decf sys.int::*memory-expansion-remaining* (* expansion 2))
-            ;; Do new & oldspace allocations seperately, this interacts better with the freelist.
-            (mezzano.supervisor:with-mutex (mezzano.supervisor::*vm-lock*)
+  (mezzano.supervisor:without-footholds
+    (tagbody
+     OUTER-LOOP
+       (mezzano.supervisor:with-mutex (*allocator-lock*)
+         (tagbody
+          INNER-LOOP
+            (return-from cons
+              (mezzano.supervisor:with-pseudo-atomic
+                (when (> (+ sys.int::*cons-area-bump* 16) sys.int::*cons-area-limit*)
+                  (go EXPAND-AREA))
+                ;; Enough size, allocate here.
+                (let* ((addr (logior (ash sys.int::+address-tag-cons+ sys.int::+address-tag-shift+)
+                                     sys.int::*cons-area-bump*
+                                     sys.int::*dynamic-mark-bit*))
+                       (val (sys.int::%%assemble-value addr sys.int::+tag-cons+)))
+                  (incf sys.int::*cons-area-bump* 16)
+                  (setf (car val) car
+                        (cdr val) cdr)
+                  val)))
+          EXPAND-AREA
+            ;; No memory. If there's memory available, then expand the area, otherwise run the GC.
+            ;; Cannot be done when pseudo-atomic.
+            ;; Divide granularity by two because this is a semispace area. Need twice as much memory.
+            (let ((expansion (logand (truncate *cons-area-expansion-granularity* 2) (lognot #xFFF))))
+              (mezzano.supervisor::debug-print-line "Expanding cons area by " expansion)
+              (when (< sys.int::*memory-expansion-remaining* (* expansion 2))
+                ;; Not enough memory, abandon ship, do a gc and then attempt the allocation again.
+                (go DO-GC))
+              (decf sys.int::*memory-expansion-remaining* (* expansion 2))
+              ;; Do new & oldspace allocations seperately, this interacts better with the freelist.
               ;; Allocate newspace.
-              (dotimes (i (truncate expansion #x1000))
-                (mezzano.supervisor::allocate-new-block-for-virtual-address
-                 (logior sys.int::*dynamic-mark-bit*
-                         (ash sys.int::+address-tag-cons+
-                              sys.int::+address-tag-shift+)
-                         (+ sys.int::*cons-area-limit*
-                            (* i #x1000)))
-                 (logior sys.int::+block-map-present+
-                         sys.int::+block-map-writable+
-                         sys.int::+block-map-zero-fill+)))
+              (mezzano.supervisor:allocate-memory-range
+               (logior sys.int::*dynamic-mark-bit*
+                       (ash sys.int::+address-tag-cons+
+                            sys.int::+address-tag-shift+)
+                       sys.int::*cons-area-limit*)
+               expansion
+               (logior sys.int::+block-map-present+
+                       sys.int::+block-map-writable+
+                       sys.int::+block-map-zero-fill+))
               ;; Allocate oldspace.
-              (dotimes (i (truncate expansion #x1000))
-                (mezzano.supervisor::allocate-new-block-for-virtual-address
-                 (logior (logxor sys.int::*dynamic-mark-bit*
-                                 (ash 1 sys.int::+address-mark-bit+))
-                         (ash sys.int::+address-tag-cons+
-                              sys.int::+address-tag-shift+)
-                         (+ sys.int::*cons-area-limit*
-                            (* i #x1000)))
-                 sys.int::+block-map-zero-fill+)))
-            (incf sys.int::*cons-area-limit* expansion))
-          (go INNER-LOOP)))
-   DO-GC
-     ;; Must occur outside the locks.
-     (sys.int::gc)
-     (go OUTER-LOOP)))
+              (mezzano.supervisor:allocate-memory-range
+               (logior (logxor sys.int::*dynamic-mark-bit*
+                               (ash 1 sys.int::+address-mark-bit+))
+                       (ash sys.int::+address-tag-cons+
+                            sys.int::+address-tag-shift+)
+                       sys.int::*cons-area-limit*)
+               expansion
+               sys.int::+block-map-zero-fill+)
+              (incf sys.int::*cons-area-limit* expansion))
+            (go INNER-LOOP)))
+     DO-GC
+       ;; Must occur outside the locks.
+       (sys.int::gc)
+       (go OUTER-LOOP))))
 
 (defun sys.int::make-simple-vector (size &optional area)
   (%allocate-object sys.int::+object-tag-array-t+ size size area))

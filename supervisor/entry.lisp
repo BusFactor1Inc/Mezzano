@@ -22,29 +22,6 @@
   (assert (sys.int::character-array-p string))
   (sys.int::%array-like-ref-t string 3))
 
-(defun sys.int::assert-error (test-form datum &rest arguments)
-  (declare (dynamic-extent arguments))
-  (panic "Assert error " datum " " arguments))
-
-;; Back-compat.
-(defmacro with-gc-deferred (&body body)
-  `(with-pseudo-atomic ,@body))
-
-(defun call-with-gc-deferred (thunk)
-  (call-with-pseudo-atomic thunk))
-
-(defun find-extent-named (name largep)
-  (cond ((store-extent-p name) name)
-        (t (dolist (extent *extent-table*
-                    (error "can't find extent..."))
-             (when (and (or (eql (store-extent-type extent) name)
-                            (and (eql name :wired)
-                                 (eql (store-extent-type extent) :pinned)
-                                 (store-extent-wired-p extent)))
-                        (not (store-extent-finished-p extent))
-                        (eql (store-extent-large-p extent) largep))
-               (return extent))))))
-
 (defun stack-base (stack)
   (car stack))
 
@@ -55,64 +32,25 @@
 (defun %allocate-stack (size &optional wired)
   ;; 4k align the size.
   (setf size (logand (+ size #xFFF) (lognot #xFFF)))
-  (let* ((addr (with-symbol-spinlock (mezzano.runtime::*wired-allocator-lock*)
-                 (prog1 (logior (+ (if wired sys.int::*wired-stack-area-bump* sys.int::*stack-area-bump*) #x200000)
-                                (ash sys.int::+address-tag-stack+ sys.int::+address-tag-shift+))
-                   ;; 2m align the memory region.
-                   (if wired
-                       (incf sys.int::*wired-stack-area-bump* (align-up size #x200000))
-                       (incf sys.int::*stack-area-bump* (align-up size #x200000))))))
+  (let* ((addr (safe-without-interrupts (size wired)
+                 (with-symbol-spinlock (mezzano.runtime::*wired-allocator-lock*)
+                   (prog1 (logior (+ (if wired sys.int::*wired-stack-area-bump* sys.int::*stack-area-bump*) #x200000)
+                                  (ash sys.int::+address-tag-stack+ sys.int::+address-tag-shift+))
+                     ;; 2m align the memory region.
+                     (if wired
+                         (incf sys.int::*wired-stack-area-bump* (align-up size #x200000))
+                         (incf sys.int::*stack-area-bump* (align-up size #x200000)))))))
          (stack (sys.int::cons-in-area addr size :wired)))
     ;; Allocate blocks.
-    (with-mutex (*vm-lock*)
-      (dotimes (i (ceiling size #x1000))
-        (allocate-new-block-for-virtual-address (+ addr (* i #x1000))
-                                                (logior sys.int::+block-map-present+
-                                                        sys.int::+block-map-writable+
-                                                        sys.int::+block-map-zero-fill+))))
+    (allocate-memory-range addr size
+                           (logior sys.int::+block-map-present+
+                                   sys.int::+block-map-writable+
+                                   sys.int::+block-map-zero-fill+))
     stack))
 
 ;; TODO.
 (defun sleep (seconds)
   nil)
-
-(defun sys.int::raise-undefined-function (fref)
-  (let ((name (sys.int::%array-like-ref-t fref sys.int::+fref-name+)))
-    (cond ((consp name)
-           (panic "Undefined function (" (symbol-name (car name)) " " (symbol-name (car (cdr name))) ")"))
-          (t (panic "Undefined function " (symbol-name name))))))
-
-(defun sys.int::raise-unbound-error (symbol)
-  (panic "Unbound symbol " (symbol-name symbol)))
-
-(in-package :sys.int)
-
-(defstruct (cold-stream (:area :wired)))
-
-(in-package :mezzano.supervisor)
-
-(defvar *cold-unread-char*)
-
-(defun sys.int::cold-write-char (c stream)
-  (declare (ignore stream))
-  (debug-write-char c))
-
-(defun sys.int::cold-start-line-p (stream)
-  (declare (ignore stream))
-  (debug-start-line-p))
-
-(defun sys.int::cold-read-char (stream)
-  (declare (ignore stream))
-  (cond (*cold-unread-char*
-         (prog1 *cold-unread-char*
-           (setf *cold-unread-char* nil)))
-        (t (debug-read-char))))
-
-(defun sys.int::cold-unread-char (character stream)
-  (declare (ignore stream))
-  (when *cold-unread-char*
-    (error "Multiple unread-char!"))
-  (setf *cold-unread-char* character))
 
 ;;; <<<<<<
 
@@ -285,13 +223,13 @@ Collisions."
 (defun net-receive-packet ()
   "Wait for a packet to arrive.
 Returns two values, the packet data and the receiving NIC."
-  (let ((info (fifo-pop *received-packets*)))
+  (let ((info (irq-fifo-pop *received-packets*)))
     (values (cdr info) (car info))))
 
 (defun nic-received-packet (device pkt)
   (let ((nic (find device *nics* :key #'nic-device)))
     (when nic
-      (fifo-push (cons nic pkt) *received-packets* nil))))
+      (irq-fifo-push (cons nic pkt) *received-packets*))))
 
 (defvar *deferred-boot-actions*)
 
@@ -305,7 +243,6 @@ Returns two values, the packet data and the receiving NIC."
     (initialize-early-debug-serial serial-port-io-base)
     (initialize-initial-thread)
     (setf *boot-information-page* boot-information-page
-          *block-cache* nil
           *cold-unread-char* nil
           mezzano.runtime::*paranoid-allocation* nil
           *nics* '()
@@ -321,8 +258,9 @@ Returns two values, the packet data and the receiving NIC."
       (setf mezzano.runtime::*tls-lock* :unlocked
             mezzano.runtime::*active-catch-handlers* 'nil
             *pseudo-atomic* nil
-            *received-packets* (make-fifo 50)))
-    (fifo-reset *received-packets*)
+            ;; FIXME: This should be a normal non-IRQ FIFO, but
+            ;; creating a FIFO won't work until the cold load finishes.
+            *received-packets* (make-irq-fifo 50)))
     (setf *boot-id* (sys.int::cons-in-area nil nil :wired))
     (initialize-interrupts)
     (initialize-i8259)
@@ -334,8 +272,10 @@ Returns two values, the packet data and the receiving NIC."
     (initialize-debug-serial serial-port-io-base 4 38400)
     ;;(debug-set-output-pseudostream (lambda (op &optional arg) (declare (ignore op arg))))
     (debug-write-line "Hello, Debug World!")
+    (irq-fifo-reset *received-packets*)
     (initialize-time)
     (initialize-ata)
+    (initialize-ahci)
     (initialize-virtio)
     (initialize-virtio-net)
     (initialize-ps/2)

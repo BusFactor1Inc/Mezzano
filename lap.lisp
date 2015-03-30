@@ -168,7 +168,7 @@ a vector of constants and an alist of symbols & addresses."
   (push (cons name *current-address*) *fixups*))
 
 (defun emit-gc (&rest args)
-  (destructuring-bind (frame-mode &key (layout #*) (pushed-values 0) incoming-arguments interrupt multiple-values pushed-values-register block-or-tagbody-thunk)
+  (destructuring-bind (frame-mode &key (layout #*) (pushed-values 0) incoming-arguments interrupt multiple-values pushed-values-register block-or-tagbody-thunk extra-registers)
       args
     (check-type frame-mode (member :frame :no-frame))
     (check-type layout bit-vector)
@@ -184,6 +184,8 @@ a vector of constants and an alist of symbols & addresses."
                                            (member :rax)))
     ;; Canonicalise keyword order, so EQUAL can be used to strip duplicates.
     (let ((gc-keys '()))
+      (when extra-registers
+        (setf (getf gc-keys :extra-registers) extra-registers))
       (when block-or-tagbody-thunk
         (setf (getf gc-keys :block-or-tagbody-thunk) block-or-tagbody-thunk))
       (when pushed-values-register
@@ -228,28 +230,46 @@ a vector of constants and an alist of symbols & addresses."
       (setf integer (ash integer -7)))))
 
 (defun encode-gc-info (info)
-  (destructuring-bind (address frame-mode &key (layout #*) (pushed-values 0) incoming-arguments interrupt multiple-values pushed-values-register block-or-tagbody-thunk)
+  (destructuring-bind (address frame-mode
+                               &key
+                               (layout #*)
+                               (pushed-values 0)
+                               incoming-arguments
+                               interrupt
+                               multiple-values
+                               pushed-values-register
+                               block-or-tagbody-thunk
+                               extra-registers)
       info
     (let ((bytes (make-array 10 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
       (append-vu32 address bytes)
       (vector-push-extend (logior (ecase frame-mode
-                                    (:frame #b0001)
+                                    (:frame
+                                     #b00000001)
                                     (:no-frame 0))
-                                  (if interrupt #b0010 0)
+                                  (cond
+                                    (interrupt
+                                     #b00000010)
+                                    (t 0))
                                   (cond
                                     (block-or-tagbody-thunk
                                      (assert (eql block-or-tagbody-thunk :rax))
-                                     #b0100)
+                                     #b00000100)
                                     (t 0))
                                   (cond
                                     (incoming-arguments
-                                     #b1000)
+                                     #b00001000)
                                     (t 0))
-                                  (ash (if pushed-values-register
-                                           ;; ehhhh
-                                           (funcall (intern "REG-NUMBER" :sys.lap-x86) pushed-values-register)
-                                           4)
-                                       4))
+                                  (cond
+                                    (pushed-values-register
+                                     (assert (eql pushed-values-register :rcx))
+                                     #b00010000)
+                                    (t 0))
+                                  (ecase extra-registers
+                                    ((nil) 0)
+                                    ((:rax)         #b00100000)
+                                    ((:rax-rcx)     #b01000000)
+                                    ((:rax-rcx-rdx) #b01100000)))
                           bytes)
       (vector-push-extend (logior (or multiple-values #b1111)
                                   (ash (cond ((keywordp incoming-arguments)

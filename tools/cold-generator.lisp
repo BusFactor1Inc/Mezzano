@@ -14,6 +14,7 @@
     "supervisor/serial.lisp"
     "supervisor/disk.lisp"
     "supervisor/ata.lisp"
+    "supervisor/ahci.lisp"
     "supervisor/thread.lisp"
     "supervisor/physical.lisp"
     "supervisor/snapshot.lisp"
@@ -681,7 +682,7 @@
   (check-type high (unsigned-byte 32))
   (dpb high (byte 32 32) low))
 
-(defun create-thread (name &key stack-size (initial-state :runnable) (preemption-disable-depth 0) (foothold-disable-depth 0))
+(defun create-thread (name &key stack-size (initial-state :runnable))
   (check-type initial-state (member :active :runnable :sleeping :dead))
   (let* ((address (allocate 512 :wired))
          (stack (create-stack (* stack-size 8)))
@@ -696,11 +697,9 @@
     (setf (word (+ address 1)) (make-value (store-string name)
                                            sys.int::+tag-object+))
     ;; State.
-    (setf (word (+ address 2)) (make-value (symbol-address (symbol-name initial-state) "KEYWORD")
-                                           sys.int::+tag-object+))
+    (setf (word (+ address 2)) (vsym initial-state))
     ;; Lock.
-    (setf (word (+ address 3)) (make-value (symbol-address "UNLOCKED" "KEYWORD")
-                                           sys.int::+tag-object+))
+    (setf (word (+ address 3)) (vsym :unlocked))
     ;; Stack.
     (setf (word (+ address 4)) stack-object)
     ;; Stack pointer.
@@ -708,21 +707,15 @@
                                   (stack-size stack)))
     ;; +6, unused
     ;; Special stack pointer.
-    (setf (word (+ address 7)) (make-value (symbol-address "NIL" "COMMON-LISP")
-                                           sys.int::+tag-object+))
-    ;; Preemption disable depth.
-    (setf (word (+ address 8)) (make-fixnum preemption-disable-depth))
-    ;; Preemption pending.
-    (setf (word (+ address 9)) (make-value (symbol-address "NIL" "COMMON-LISP")
-                                           sys.int::+tag-object+))
+    (setf (word (+ address 7)) (vsym 'nil))
     ;; Next.
-    (setf (word (+ address 10)) (make-value (symbol-address "NIL" "COMMON-LISP")
-                                            sys.int::+tag-object+))
+    (setf (word (+ address 10)) (vsym 'nil))
     ;; Prev.
-    (setf (word (+ address 11)) (make-value (symbol-address "NIL" "COMMON-LISP")
-                                            sys.int::+tag-object+))
-    ;; foothold disable depth.
-    (setf (word (+ address 12)) (make-fixnum foothold-disable-depth))
+    (setf (word (+ address 11)) (vsym 'nil))
+    ;; Pending footholds.
+    (setf (word (+ address 12)) (vsym 'nil))
+    ;; Inhibit footholds.
+    (setf (word (+ address 13)) (make-fixnum 1))
     ;; mutex stack.
     (setf (word (+ address 14)) (vsym 'nil))
     (make-value address sys.int::+tag-object+)))
@@ -731,9 +724,7 @@
   (setf (cold-symbol-value 'sys.int::*initial-thread*)
         (create-thread "Initial thread"
                        :stack-size (* 16 1024)
-                       :initial-state :active
-                       :preemption-disable-depth 1
-                       :foothold-disable-depth 1)))
+                       :initial-state :active)))
 
 (defun canonical-symbol-package (symbol)
   (when (keywordp symbol)
@@ -944,6 +935,22 @@
         (build-unicode:generate-unifont-table s))
     (setf (cold-symbol-value 'sys.int::*unifont-bmp*) (save-object tree :pinned))
     (setf (cold-symbol-value 'sys.int::*unifont-bmp-data*) (save-object data :pinned))))
+
+(defun save-debug-8x8-font (path)
+  (let* ((font-data (with-open-file (s path) (read s)))
+         (font-array (make-array 128 :initial-element nil)))
+    (assert (eql (array-dimension font-data 0) 128))
+    (dotimes (i 128)
+      (let ((array (make-array (* 8 8) :element-type '(unsigned-byte 32))))
+        (setf (aref font-array i) array)
+        (dotimes (y 8)
+          (let ((line (aref font-data i y)))
+            (dotimes (x 8)
+              (setf (aref array (+ (* y 8) x)) (if (logbitp x line)
+                                                   #xFF000000
+                                                   #xFFFFFFFF)))))))
+    (setf (cold-symbol-value 'sys.int::*debug-8x8-font*) (save-object font-array :wired))))
+
 
 ;; Handlers for the defined CPU exceptions, a bool indicating if they take
 ;; an error code or not and the IST to use.
@@ -1208,7 +1215,8 @@
                                      (collect (symbol-name sym)))
                                :test #'string=))
          (pf-exception-stack (create-stack (* 128 1024)))
-         (irq-stack (create-stack (* 128 1024))))
+         (irq-stack (create-stack (* 128 1024)))
+         (wired-stack (create-stack (* 128 1024))))
     ;; Generate the support objects. NIL/T/etc, and the initial thread.
     (create-support-objects)
     (create-low-level-interrupt-support)
@@ -1216,6 +1224,8 @@
           (cold-symbol-value 'sys.int::*exception-stack-size*) (make-fixnum (stack-size pf-exception-stack)))
     (setf (cold-symbol-value 'sys.int::*irq-stack-base*) (make-fixnum (stack-base irq-stack))
           (cold-symbol-value 'sys.int::*irq-stack-size*) (make-fixnum (stack-size irq-stack)))
+    (setf (cold-symbol-value 'sys.int::*bsp-wired-stack-base*) (make-fixnum (stack-base wired-stack))
+          (cold-symbol-value 'sys.int::*bsp-wired-stack-size*) (make-fixnum (stack-size wired-stack)))
     (setf initial-thread (create-initial-thread))
     ;; Load all cold source files, emitting the top-level forms into an array
     ;; FIXME: Top-level forms generally show up as functions in .LLF files,
@@ -1236,6 +1246,8 @@
     (let ((*load-time-evals* '()))
       (load-source-files extra-source-files nil)
       (generate-toplevel-form-array (reverse *load-time-evals*) 'sys.int::*additional-cold-toplevel-forms*))
+    (format t "Saving 8x8 debug font.~%")
+    (save-debug-8x8-font "tools/font8x8")
     (format t "Saving Unifont...~%")
     (save-unifont-data "tools/unifont-5.1.20080820.hex")
     (format t "Saving Unicode data...~%")
@@ -1287,27 +1299,20 @@
             ))
     (setf (cold-symbol-value 'sys.int::*bsp-idle-thread*)
           (create-thread "BSP idle thread"
-                         :stack-size (* 16 1024)
-                         :preemption-disable-depth 1
-                         :foothold-disable-depth 1))
+                         :stack-size (* 16 1024)))
     (setf (cold-symbol-value 'sys.int::*snapshot-thread*)
           (create-thread "Snapshot thread"
                          :stack-size (* 128 1024)
-                         :preemption-disable-depth 1
-                         :foothold-disable-depth 1
                          :initial-state :sleeping))
     (setf (cold-symbol-value 'sys.int::*pager-thread*)
           (create-thread "Pager thread"
                          :stack-size (* 128 1024)
-                         :preemption-disable-depth 1
-                         :foothold-disable-depth 1
                          :initial-state :sleeping))
     (setf (cold-symbol-value 'sys.int::*disk-io-thread*)
           (create-thread "Disk IO thread"
                          :stack-size (* 128 1024)
-                         :preemption-disable-depth 1
-                         :foothold-disable-depth 1
                          :initial-state :sleeping))
+    (setf (cold-symbol-value 'sys.int::*bsp-info-vector*) (save-object (make-array (1- (* 2 #x1000))) :wired))
     ;; Make sure there's a keyword for each package.
     (iter (for ((nil . package-name) nil) in-hashtable *symbol-table*)
           (symbol-address package-name "KEYWORD"))

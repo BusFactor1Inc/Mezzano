@@ -5,6 +5,7 @@
 
 (defvar *gc-debug-scavenge-stack* nil)
 (defvar *gc-debug-freelist-rebuild* nil)
+(defvar *gc-debug-metadata* t)
 
 ;;; GC Meters.
 (defvar *objects-copied* 0)
@@ -21,9 +22,6 @@
 ;; How many bytes the allocators can expand their areas by before a GC must occur.
 ;; This is shared between all areas.
 (defvar *memory-expansion-remaining* 0)
-
-;; What *MEMORY-EXPANSION-REMAINING* should be set to after a GC.
-(defvar *memory-expansion* (* 128 1024 1024))
 
 (defun room (&optional (verbosity :default))
   (let ((total-used 0)
@@ -62,6 +60,12 @@
       (format t "~:D/~:D store blocks used (~D%).~%"
               (- total-blocks n-free-blocks) total-blocks
               (truncate (* (- total-blocks n-free-blocks) 100) total-blocks)))
+    (multiple-value-bind (n-free-page-frames total-page-frames)
+        (mezzano.supervisor:physical-memory-statistics)
+      (format t "~:D/~:D physical pages used (~D%).~%"
+              (- total-page-frames n-free-page-frames) total-page-frames
+              (truncate (* (- total-page-frames n-free-page-frames) 100)
+                        total-page-frames)))
     (format t "~:D words to next GC.~%" (truncate *memory-expansion-remaining* 8)))
   (values))
 
@@ -138,8 +142,7 @@ This is required to make the GC interrupt safe."
     (mezzano.supervisor:debug-print-line "Scav GC stack")
     (scavenge-stack stack-pointer
                     (memref-unsigned-byte-64 frame-pointer 0)
-                    return-address
-                    nil)))
+                    return-address)))
 
 (defun scavenge-object (object)
   "Scavenge one object, returning an updated pointer."
@@ -234,7 +237,8 @@ This is required to make the GC interrupt safe."
 
 (defun debug-stack-frame (framep interruptp pushed-values pushed-values-register
                           layout-address layout-length
-                          multiple-values incoming-arguments block-or-tagbody-thunk)
+                          multiple-values incoming-arguments
+                          block-or-tagbody-thunk extra-registers)
   (when *gc-debug-scavenge-stack*
     (if framep
         (mezzano.supervisor:debug-print-line "frame")
@@ -254,101 +258,21 @@ This is required to make the GC interrupt safe."
           (t (mezzano.supervisor:debug-print-line "no-incoming-arguments")))
     (if block-or-tagbody-thunk
         (mezzano.supervisor:debug-print-line "btt: " block-or-tagbody-thunk)
-        (mezzano.supervisor:debug-print-line "no-btt"))))
+        (mezzano.supervisor:debug-print-line "no-btt"))
+    (if extra-registers
+        (mezzano.supervisor:debug-print-line "xr: " extra-registers)
+        (mezzano.supervisor:debug-print-line "no-xr"))))
 
-(defun scavenge-stack (stack-pointer frame-pointer return-address interruptedp)
+(defun scavenge-stack (stack-pointer frame-pointer return-address)
   (when *gc-debug-scavenge-stack* (mezzano.supervisor:debug-print-line "Scav stack..."))
-  (when interruptedp
-    ;; Thread has stopped due to an interrupted, stack-pointer points the start of
-    ;; the thread's interrupt save area.
-    ;; Examine it, then continue with normal stack scavenging.
-    (when *gc-debug-scavenge-stack* (mezzano.supervisor:debug-print-line "Scav interrupted stack..."))
-    (setf frame-pointer (+ stack-pointer (* 14 8))) ; sp => interrupt frame
-    (let* ((other-return-address (memref-unsigned-byte-64 frame-pointer 1))
-           (other-frame-pointer (memref-unsigned-byte-64 frame-pointer 0))
-           (other-stack-pointer (memref-unsigned-byte-64 frame-pointer 4))
-           (other-fn (return-address-to-function other-return-address))
-           (other-fn-address (logand (lisp-object-address other-fn) -16))
-           (other-fn-offset (- other-return-address other-fn-address)))
-      (when *gc-debug-scavenge-stack*
-        (mezzano.supervisor:debug-print-line "oRA: " other-return-address)
-        (mezzano.supervisor:debug-print-line "oFP: " other-frame-pointer)
-        (mezzano.supervisor:debug-print-line "oSP: " other-stack-pointer)
-        (mezzano.supervisor:debug-print-line "oFNa: " other-fn-address)
-        (mezzano.supervisor:debug-print-line "oFNo: " other-fn-offset))
-      ;; Unconditionally scavenge the saved data registers.
-      (scavengef (memref-t frame-pointer -12)) ; r8
-      (scavengef (memref-t frame-pointer -11)) ; r9
-      (scavengef (memref-t frame-pointer -10)) ; r10
-      (scavengef (memref-t frame-pointer -9)) ; r11
-      (scavengef (memref-t frame-pointer -8)) ; r12
-      (scavengef (memref-t frame-pointer -7)) ; r13
-      (scavengef (memref-t frame-pointer -6)) ; rbx
-      (multiple-value-bind (other-framep other-interruptp other-pushed-values other-pushed-values-register
-                                         other-layout-address other-layout-length
-                                         other-multiple-values other-incoming-arguments other-block-or-tagbody-thunk)
-          (gc-info-for-function-offset other-fn other-fn-offset)
-        (debug-stack-frame other-framep other-interruptp other-pushed-values other-pushed-values-register
-                           other-layout-address other-layout-length
-                           other-multiple-values other-incoming-arguments other-block-or-tagbody-thunk)
-        (when (or other-interruptp
-                  (and (not (eql other-pushed-values 0))
-                       (or other-interruptp
-                           (not other-framep)))
-                  (not (eql other-pushed-values-register nil))
-                  #+nil(not (or (eql other-pushed-values-register nil)
-                                (eql other-pushed-values-register :rcx)))
-                  (and other-multiple-values (not (eql other-multiple-values 0)))
-                  (and (keywordp other-incoming-arguments) (not (eql other-incoming-arguments :rcx)))
-                  other-block-or-tagbody-thunk)
-          (let ((*gc-debug-scavenge-stack* t))
-            (mezzano.supervisor:debug-print-line "oRA: " other-return-address)
-            (mezzano.supervisor:debug-print-line "oFP: " other-frame-pointer)
-            (mezzano.supervisor:debug-print-line "oSP: " other-stack-pointer)
-            (mezzano.supervisor:debug-print-line "oFNa: " other-fn-address)
-            (mezzano.supervisor:debug-print-line "oFNo: " other-fn-offset)
-            (debug-stack-frame other-framep other-interruptp other-pushed-values other-pushed-values-register
-                               other-layout-address other-layout-length
-                               other-multiple-values other-incoming-arguments other-block-or-tagbody-thunk))
-          (mezzano.supervisor:panic "TODO! GC SG stuff. (interrupt)"))
-        (when (keywordp other-incoming-arguments)
-          (when (not (eql other-incoming-arguments :rcx))
-            (let ((*gc-debug-scavenge-stack* t))
-              (debug-stack-frame other-framep other-interruptp other-pushed-values other-pushed-values-register
-                                 other-layout-address other-layout-length
-                                 other-multiple-values other-incoming-arguments other-block-or-tagbody-thunk))
-            (mezzano.supervisor:panic "TODO? incoming-arguments not in RCX"))
-          (setf other-incoming-arguments nil)
-          (mezzano.supervisor:debug-print-line "ia-count " (memref-t frame-pointer -2))
-          (scavenge-stack-n-incoming-arguments
-           other-frame-pointer other-stack-pointer other-framep
-           other-layout-length
-           ;; RCX.
-           (memref-t frame-pointer -2)))
-        (scavenge-regular-stack-frame other-frame-pointer other-stack-pointer other-framep
-                                      other-layout-address other-layout-length
-                                      other-incoming-arguments other-pushed-values)
-        (cond (other-framep
-               ;; Stop after seeing a zerop frame pointer.
-               (when (eql other-frame-pointer 0)
-                 (when *gc-debug-scavenge-stack* (mezzano.supervisor:debug-print-line "Done scav stack."))
-                 (return-from scavenge-stack))
-               (psetf return-address (memref-unsigned-byte-64 other-frame-pointer 1)
-                      stack-pointer (+ other-frame-pointer 16)
-                      frame-pointer (memref-unsigned-byte-64 other-frame-pointer 0)))
-              (t ;; No frame, carefully pick out the new values.
-               ;; Frame pointer should be unchanged.
-               (setf frame-pointer other-frame-pointer)
-               ;; Stack pointer needs the return address popped off,
-               ;; and any layout variables.
-               (setf stack-pointer (+ other-stack-pointer (* (1+ other-layout-length) 8)))
-               ;; Return address should be one below the stack pointer.
-               (setf return-address (memref-unsigned-byte-64 stack-pointer -1)))))))
-  (tagbody LOOP
+  (loop
      (when *gc-debug-scavenge-stack*
        (mezzano.supervisor:debug-print-line "SP: " stack-pointer)
        (mezzano.supervisor:debug-print-line "FP: " frame-pointer)
        (mezzano.supervisor:debug-print-line "RA: " return-address))
+     (when (zerop return-address)
+       (when *gc-debug-scavenge-stack* (mezzano.supervisor:debug-print-line "Done scav stack."))
+       (return))
      (let* ((fn (return-address-to-function return-address))
             (fn-address (logand (lisp-object-address fn) -16))
             (fn-offset (- return-address fn-address)))
@@ -358,35 +282,164 @@ This is required to make the GC interrupt safe."
        (scavenge-object fn)
        (multiple-value-bind (framep interruptp pushed-values pushed-values-register
                                     layout-address layout-length
-                                    multiple-values incoming-arguments block-or-tagbody-thunk)
+                                    multiple-values incoming-arguments
+                                    block-or-tagbody-thunk extra-registers)
            (gc-info-for-function-offset fn fn-offset)
-         (when (or interruptp
-                   (and (not (eql pushed-values 0))
-                        (or interruptp
-                            (not framep)))
-                   pushed-values-register
-                   (and multiple-values (not (eql multiple-values 0)))
-                   (or (keywordp incoming-arguments)
-                       (and incoming-arguments (not framep)))
-                   block-or-tagbody-thunk)
-           (let ((*gc-debug-scavenge-stack* t))
-             (debug-stack-frame framep interruptp pushed-values pushed-values-register
-                                layout-address layout-length
-                                multiple-values incoming-arguments block-or-tagbody-thunk))
-           (mezzano.supervisor:panic "TODO! GC SG stuff."))
+         (when *gc-debug-metadata*
+           (flet ((bad-metadata (message)
+                    (let ((*gc-debug-scavenge-stack* t))
+                      (mezzano.supervisor:debug-print-line "RA: " return-address)
+                      (mezzano.supervisor:debug-print-line "FP: " frame-pointer)
+                      (mezzano.supervisor:debug-print-line "SP: " stack-pointer)
+                      (mezzano.supervisor:debug-print-line "FNa: " fn-address)
+                      (mezzano.supervisor:debug-print-line "FNo: " fn-offset)
+                      (debug-stack-frame framep interruptp pushed-values pushed-values-register
+                                         layout-address layout-length
+                                         multiple-values incoming-arguments
+                                         block-or-tagbody-thunk extra-registers))
+                    (mezzano.supervisor:panic "Bad GC metadata: " message)))
+             (declare (dynamic-extent #'bad-metadata))
+             ;; Validate metadata.
+             (when interruptp
+               (bad-metadata ":INTERRUPT not defined or implemented."))
+             (when (and (not framep)
+                        (not (eql pushed-values 0)))
+               (bad-metadata "Non-zero :PUSHED-VALUES is incompatible with :NO-FRAME. Use :LAYOUT."))
+             ;; The remaining tests are because they refer to registers.
+             ;; Functions seen by SCAVENGE-STACK are all in the middle of call instructions, so
+             ;; referring to registers makes no sense.
+             (when pushed-values-register
+               (bad-metadata "PUSHED-VALUES-REGISTER seen outside full-save'd function."))
+             (when (and multiple-values (not (eql multiple-values 0)))
+               ;; :MULTIPLE-VALUES 0 is permitted, but ignored.
+               ;; This occurs immediately after call instructions that expect a multiple-value result.
+               (bad-metadata "Non-zero/non-nil :MULTIPLE-VALUES seen outside full-save'd function."))
+             (when block-or-tagbody-thunk
+               (bad-metadata ":BLOCK-OR-TAGBODY-THUNK seen outside full-save'd function."))
+             (when (eql incoming-arguments :rcx)
+               (bad-metadata ":INCOMING-ARGUMENTS :RCX seen outside full-save'd function."))
+             (when extra-registers
+               (bad-metadata ":EXTRA-REGISTERS seen outside full-save'd function."))))
          (scavenge-regular-stack-frame frame-pointer stack-pointer framep
                                        layout-address layout-length
                                        incoming-arguments pushed-values)
          ;; Stop after seeing a zerop frame pointer.
          (when (eql frame-pointer 0)
            (when *gc-debug-scavenge-stack* (mezzano.supervisor:debug-print-line "Done scav stack."))
-           (return-from scavenge-stack))
-         (if (not framep)
-             (mezzano.supervisor:panic "No frame, but no end in sight?"))
+           (return))
+         (when (not framep) ; ???
+           (mezzano.supervisor:panic "No frame, but no end in sight?"))
          (psetf return-address (memref-unsigned-byte-64 frame-pointer 1)
                 stack-pointer (+ frame-pointer 16)
-                frame-pointer (memref-unsigned-byte-64 frame-pointer 0))))
-     (go LOOP)))
+                frame-pointer (memref-unsigned-byte-64 frame-pointer 0))))))
+
+(defun scavenge-full-save-thread (thread)
+  ;; Thread has stopped due to an interrupt.
+  ;; Examine it, then perform normal stack scavenging.
+  (when *gc-debug-scavenge-stack* (mezzano.supervisor:debug-print-line "Scav full-save thread..."))
+  (let* ((return-address (mezzano.supervisor:thread-state-rip thread))
+         (frame-pointer (mezzano.supervisor:thread-frame-pointer thread))
+         (stack-pointer (mezzano.supervisor:thread-stack-pointer thread))
+         (fn (return-address-to-function return-address))
+         (fn-address (logand (lisp-object-address fn) -16))
+         (fn-offset (- return-address fn-address)))
+    (when *gc-debug-scavenge-stack*
+      (mezzano.supervisor:debug-print-line "RA: " return-address)
+      (mezzano.supervisor:debug-print-line "FP: " frame-pointer)
+      (mezzano.supervisor:debug-print-line "SP: " stack-pointer)
+      (mezzano.supervisor:debug-print-line "FNa: " fn-address)
+      (mezzano.supervisor:debug-print-line "FNo: " fn-offset))
+    ;; Unconditionally scavenge the saved data registers.
+    (scavengef (mezzano.supervisor:thread-state-r8-value thread))
+    (scavengef (mezzano.supervisor:thread-state-r9-value thread))
+    (scavengef (mezzano.supervisor:thread-state-r10-value thread))
+    (scavengef (mezzano.supervisor:thread-state-r11-value thread))
+    (scavengef (mezzano.supervisor:thread-state-r12-value thread))
+    (scavengef (mezzano.supervisor:thread-state-r13-value thread))
+    (scavengef (mezzano.supervisor:thread-state-rbx-value thread))
+    (multiple-value-bind (framep interruptp pushed-values pushed-values-register
+                          layout-address layout-length
+                          multiple-values incoming-arguments
+                          block-or-tagbody-thunk extra-registers)
+        (gc-info-for-function-offset fn fn-offset)
+      (when *gc-debug-metadata*
+        (flet ((bad-metadata (message)
+                 (let ((*gc-debug-scavenge-stack* t))
+                   (mezzano.supervisor:debug-print-line "RA: " return-address)
+                   (mezzano.supervisor:debug-print-line "FP: " frame-pointer)
+                   (mezzano.supervisor:debug-print-line "SP: " stack-pointer)
+                   (mezzano.supervisor:debug-print-line "FNa: " fn-address)
+                   (mezzano.supervisor:debug-print-line "FNo: " fn-offset)
+                   (debug-stack-frame framep interruptp pushed-values pushed-values-register
+                                      layout-address layout-length
+                                      multiple-values incoming-arguments
+                                      block-or-tagbody-thunk extra-registers))
+                 (mezzano.supervisor:panic "Bad GC metadata: " message)))
+          (declare (dynamic-extent #'bad-metadata))
+          ;; Validate metadata.
+          (when interruptp
+            (bad-metadata ":INTERRUPT not defined or implemented."))
+          (when (and (not framep)
+                     (not (eql pushed-values 0)))
+            (bad-metadata "Non-zero :PUSHED-VALUES is incompatible with :NO-FRAME. Use :LAYOUT."))
+          (when (and (not framep)
+                     pushed-values-register)
+            (bad-metadata ":PUSHED-VALUES-REGISTER is incompatible with :NO-FRAME."))))
+      (ecase extra-registers
+        ((nil))
+        ((:rax)
+         (scavengef (mezzano.supervisor:thread-state-rax-value thread)))
+        ((:rax-rcx)
+         (scavengef (mezzano.supervisor:thread-state-rax-value thread))
+         (scavengef (mezzano.supervisor:thread-state-rcx-value thread)))
+        ((:rax-rcx-rdx)
+         (scavengef (mezzano.supervisor:thread-state-rax-value thread))
+         (scavengef (mezzano.supervisor:thread-state-rcx-value thread))
+         (scavengef (mezzano.supervisor:thread-state-rdx-value thread))))
+      (when block-or-tagbody-thunk
+        ;; Active NLX thunk, true stack/frame pointers stored in the NLX info
+        ;; pointed to by RAX.
+        (let ((nlx-info (mezzano.supervisor:thread-state-rax thread)))
+          (setf stack-pointer (memref-signed-byte-64 nlx-info 2)
+                frame-pointer (memref-signed-byte-64 nlx-info 3))))
+      (when multiple-values
+        ;; Scavenge the MV area.
+        (let* ((n-values (+ (mezzano.supervisor:thread-state-rcx-value thread) multiple-values))
+               (n-mv-area-values (max 0 (- n-values 5))))
+          (scavenge-many (+ address 8 (* mezzano.supervisor::+thread-mv-slots-start+ 8))
+                         (- mezzano.supervisor::+thread-mv-slots-end+ mezzano.supervisor::+thread-mv-slots-start+))))
+      (when (eql incoming-arguments :rcx)
+        ;; Prevent SCAVENGE-REGULAR-STACK-FRAME from seeing :RCX in incoming-arguments.
+        (setf incoming-arguments nil)
+        (when *gc-debug-scavenge-stack*
+          (mezzano.supervisor:debug-print-line "ia-count " (mezzano.supervisor:thread-state-rcx-value thread)))
+        (scavenge-stack-n-incoming-arguments
+         frame-pointer stack-pointer framep
+         layout-length
+         (mezzano.supervisor::thread-state-rcx-value thread)))
+      (scavenge-regular-stack-frame frame-pointer stack-pointer framep
+                                    layout-address layout-length
+                                    incoming-arguments
+                                    (+ pushed-values
+                                       (if pushed-values-register
+                                           (mezzano.supervisor:thread-state-rcx-value thread)
+                                           0)))
+      (cond ((not framep)
+             ;; No frame, carefully pick out the new values.
+             (scavenge-stack
+              ;; Stack pointer needs the return address popped off,
+              ;; and any layout variables.
+              (+ stack-pointer (* (1+ layout-length) 8))
+              ;; Frame pointer should be unchanged.
+              frame-pointer
+              ;; Return address should be one below the stack pointer.
+              (memref-unsigned-byte-64 stack-pointer -1)))
+            ((not (zerop frame-pointer))
+             (scavenge-stack (+ frame-pointer 16) ; sp
+                             (memref-unsigned-byte-64 frame-pointer 0) ; fp
+                             (memref-unsigned-byte-64 frame-pointer 1))) ; ra
+            (t (when *gc-debug-scavenge-stack*
+                 (mezzano.supervisor:debug-print-line "Done scav stack.")))))))
 
 (defun scan-thread (object)
   (when *gc-debug-scavenge-stack* (mezzano.supervisor:debug-print-line "Scav thread " object))
@@ -398,23 +451,16 @@ This is required to make the GC interrupt safe."
   (scavengef (mezzano.supervisor:thread-stack object))
   (scavengef (mezzano.supervisor:thread-special-stack-pointer object))
   (scavengef (mezzano.supervisor:thread-wait-item object))
-  (scavengef (mezzano.supervisor:thread-preemption-disable-depth object))
-  (scavengef (mezzano.supervisor:thread-preemption-pending object))
   (scavengef (mezzano.supervisor:thread-%next object))
   (scavengef (mezzano.supervisor:thread-%prev object))
-  (scavengef (mezzano.supervisor:thread-foothold-disable-depth object))
+  (scavengef (mezzano.supervisor:thread-pending-footholds object))
   (scavengef (mezzano.supervisor:thread-mutex-stack object))
   (scavengef (mezzano.supervisor:thread-global-next object))
   (scavengef (mezzano.supervisor:thread-global-prev object))
   ;; Only scan the thread's stack, MV area & TLS area when it's alive.
   (when (not (eql (mezzano.supervisor:thread-state object) :dead))
-    (let* ((address (ash (%pointer-field object) 4))
-           (stack-pointer (mezzano.supervisor:thread-stack-pointer object))
-           (frame-pointer (mezzano.supervisor:thread-frame-pointer object))
-           (return-address (memref-unsigned-byte-64 stack-pointer 0)))
-      ;; Unconditonally scavenge the TLS area and the binding stack.
-      (scavenge-many (+ address 8 (* mezzano.supervisor::+thread-mv-slots-start+ 8))
-                     (- mezzano.supervisor::+thread-mv-slots-end+ mezzano.supervisor::+thread-mv-slots-start+))
+    (let ((address (ash (%pointer-field object) 4)))
+      ;; Unconditonally scavenge the TLS area.
       (scavenge-many (+ address 8 (* mezzano.supervisor::+thread-tls-slots-start+ 8))
                      (- mezzano.supervisor::+thread-tls-slots-end+ mezzano.supervisor::+thread-tls-slots-start+))
       (when (not (or (eql object (mezzano.supervisor:current-thread))
@@ -424,10 +470,14 @@ This is required to make the GC interrupt safe."
                      ;; and the objects they do point to should be pointed to by other live objects.
                      (eql object sys.int::*bsp-idle-thread*)
                      (eql object sys.int::*pager-thread*)
-                     (eql object sys.int::*disk-io-thread*)))
-        (scavenge-stack stack-pointer frame-pointer return-address
-                        (eql (+ address (* (1+ mezzano.supervisor::+thread-interrupt-save-area+) 8))
-                             stack-pointer))))))
+                     (eql object sys.int::*disk-io-thread*)
+                     (eql object sys.int::*snapshot-thread*)))
+        (cond ((mezzano.supervisor:thread-full-save-p object)
+               (scavenge-full-save-thread object))
+              (t (let* ((stack-pointer (mezzano.supervisor:thread-stack-pointer object))
+                        (frame-pointer (mezzano.supervisor:thread-frame-pointer object))
+                        (return-address (memref-unsigned-byte-64 stack-pointer 0)))
+                   (scavenge-stack stack-pointer frame-pointer return-address))))))))
 
 (defun gc-info-for-function-offset (function offset)
   (multiple-value-bind (info-address length)
@@ -444,108 +494,94 @@ This is required to make the GC interrupt safe."
           ;; Default to RCX here for closures & other stuff. Generally the right thing.
           ;; Stuff can override if needed.
           (incoming-arguments :rcx)
-          (block-or-tagbody-thunk nil))
-      ;; Macroize because the compiler would allocate an environment/lambda for this otherwise.
-      (macrolet ((consume (&optional (errorp t))
-                   `(progn
-                      (when (>= position length)
-                        ,(if errorp
-                             `(mezzano.supervisor:panic "Reached end of GC Info??")
-                             `(debug-stack-frame framep interruptp pushed-values pushed-values-register
-                                                 layout-address layout-length
-                                                 multiple-values incoming-arguments block-or-tagbody-thunk))
-                        (return-from gc-info-for-function-offset
-                          (values framep interruptp pushed-values pushed-values-register
-                                  layout-address layout-length multiple-values
-                                  incoming-arguments block-or-tagbody-thunk)))
-                      (prog1 (memref-unsigned-byte-8 info-address position)
-                        (incf position))))
-                 (register-id (reg)
-                   `(ecase ,reg
-                      (0 :rax)
-                      (1 :rcx)
-                      (2 :rdx)
-                      (3 :rbx)
-                      (4 :rsp)
-                      (5 :rbp)
-                      (6 :rsi)
-                      (7 :rdi)
-                      (8 :r8)
-                      (9 :r9)
-                      (10 :r10)
-                      (11 :r11)
-                      (12 :r12)
-                      (13 :r13)
-                      (14 :r14)
-                      (15 :r15))))
-        (loop (let ((address 0))
-                ;; Read first byte of address, this is where we can terminate.
-                (let ((byte (consume nil))
-                      (offset 0))
-                  (setf address (ldb (byte 7 0) byte)
-                        offset 7)
-                  (when (logtest byte #x80)
-                    ;; Read remaining bytes.
-                    (loop (let ((byte (consume)))
-                            (setf (ldb (byte 7 offset) address)
-                                  (ldb (byte 7 0) byte))
-                            (incf offset 7)
-                            (unless (logtest byte #x80)
-                              (return))))))
-                (when (< offset address)
-                  (debug-stack-frame framep interruptp pushed-values pushed-values-register
-                                     layout-address layout-length
-                                     multiple-values incoming-arguments block-or-tagbody-thunk)
-                  (return-from gc-info-for-function-offset
-                          (values framep interruptp pushed-values pushed-values-register
-                                  layout-address layout-length multiple-values
-                                  incoming-arguments block-or-tagbody-thunk)))
-                ;; Read flag/pvr byte & mv-and-iabtt.
-                (let ((flags-and-pvr (consume))
-                      (mv-and-iabtt (consume)))
-                  (setf framep (logtest flags-and-pvr #b0001))
-                  (setf interruptp (logtest flags-and-pvr #b0010))
-                  (if (eql (ldb (byte 4 4) flags-and-pvr) 4)
-                      (setf pushed-values-register nil)
-                      (setf pushed-values-register
-                            (register-id (ldb (byte 4 4) flags-and-pvr))))
-                  (if (eql (ldb (byte 4 0) mv-and-iabtt) 15)
-                      (setf multiple-values nil)
-                      (setf multiple-values (ldb (byte 4 0) mv-and-iabtt)))
-                  (setf block-or-tagbody-thunk nil
-                        incoming-arguments nil)
-                  (when (logtest flags-and-pvr #b0100)
-                    (setf block-or-tagbody-thunk :rax))
-                  (when (logtest flags-and-pvr #b1000)
-                    (setf incoming-arguments (if (eql (ldb (byte 4 4) mv-and-iabtt) 15)
-                                                 :rcx
-                                                 (ldb (byte 4 4) mv-and-iabtt)))))
-                ;; Read vs32 pv.
-                (let ((shift 0)
-                      (value 0))
-                  (loop
-                     (let ((b (consume)))
-                       (when (not (logtest b #x80))
-                         (setf value (logior value (ash (logand b #x3F) shift)))
-                         (when (logtest b #x40)
-                           (setf value (- value)))
-                         (return))
-                       (setf value (logior value (ash (logand b #x7F) shift)))
-                       (incf shift 7)))
-                  (setf pushed-values value))
-                ;; Read vu32 n-layout bits.
-                (let ((shift 0)
-                      (value 0))
-                  (loop
-                     (let ((b (consume)))
-                       (setf value (logior value (ash (logand b #x7F) shift)))
-                       (when (not (logtest b #x80))
-                         (return))
-                       (incf shift 7)))
-                  (setf layout-length value)
-                  (setf layout-address (+ info-address position))
-                  ;; Consume layout bits.
-                  (incf position (ceiling layout-length 8)))))))))
+          (block-or-tagbody-thunk nil)
+          (extra-registers nil))
+      (flet ((consume ()
+               ;; Read one byte from the GC metadata.
+               (when (>= position length)
+                 (mezzano.supervisor:panic "Reached end of GC Info??"))
+               (prog1 (memref-unsigned-byte-8 info-address position)
+                 (incf position))))
+        (declare (dynamic-extent #'consume))
+        (loop
+           (when (>= position length)
+             ;; No more metadata entries past here.
+             (return))
+           (let ((address 0))
+             ;; Read first byte of address, this is where we can terminate.
+             (let ((byte (consume))
+                   (offset 0))
+               (setf address (ldb (byte 7 0) byte)
+                     offset 7)
+               (when (logtest byte #x80)
+                 ;; Read remaining bytes.
+                 (loop (let ((byte (consume)))
+                         (setf (ldb (byte 7 offset) address)
+                               (ldb (byte 7 0) byte))
+                         (incf offset 7)
+                         (unless (logtest byte #x80)
+                           (return))))))
+             (when (< offset address)
+               ;; This metadata entry is past the offset, return the previous values.
+               (return))
+             ;; Read flag/pvr byte & mv-and-iabtt.
+             (let ((flags-and-pvr (consume))
+                   (mv-and-iabtt (consume)))
+               (setf framep (logtest flags-and-pvr #b0001))
+               (setf interruptp (logtest flags-and-pvr #b0010))
+               (setf pushed-values-register (if (logtest flags-and-pvr #b10000)
+                                                :rcx
+                                                nil))
+               (setf extra-registers (case (ldb (byte 2 6) flags-and-pvr)
+                                       (0 nil)
+                                       (1 :rax)
+                                       (2 :rax-rcx)
+                                       (3 :rax-rcx-rdx)))
+               (if (eql (ldb (byte 4 0) mv-and-iabtt) 15)
+                   (setf multiple-values nil)
+                   (setf multiple-values (ldb (byte 4 0) mv-and-iabtt)))
+               (setf block-or-tagbody-thunk nil
+                     incoming-arguments nil)
+               (when (logtest flags-and-pvr #b0100)
+                 (setf block-or-tagbody-thunk :rax))
+               (when (logtest flags-and-pvr #b1000)
+                 (setf incoming-arguments (if (eql (ldb (byte 4 4) mv-and-iabtt) 15)
+                                              :rcx
+                                              (ldb (byte 4 4) mv-and-iabtt)))))
+             ;; Read vs32 pv.
+             (let ((shift 0)
+                   (value 0))
+               (loop
+                  (let ((b (consume)))
+                    (when (not (logtest b #x80))
+                      (setf value (logior value (ash (logand b #x3F) shift)))
+                      (when (logtest b #x40)
+                        (setf value (- value)))
+                      (return))
+                    (setf value (logior value (ash (logand b #x7F) shift)))
+                    (incf shift 7)))
+               (setf pushed-values value))
+             ;; Read vu32 n-layout bits.
+             (let ((shift 0)
+                   (value 0))
+               (loop
+                  (let ((b (consume)))
+                    (setf value (logior value (ash (logand b #x7F) shift)))
+                    (when (not (logtest b #x80))
+                      (return))
+                    (incf shift 7)))
+               (setf layout-length value)
+               (setf layout-address (+ info-address position))
+               ;; Consume layout bits.
+               (incf position (ceiling layout-length 8))))))
+      (debug-stack-frame framep interruptp pushed-values pushed-values-register
+                         layout-address layout-length
+                         multiple-values incoming-arguments
+                         block-or-tagbody-thunk extra-registers)
+      (values framep interruptp pushed-values pushed-values-register
+              layout-address layout-length multiple-values
+              incoming-arguments block-or-tagbody-thunk
+              extra-registers))))
 
 (defun scan-array-like (object)
   ;; Careful here. Functions with lots of GC info can have the header fall
@@ -689,9 +725,10 @@ a pointer to the new object. Leaves a forwarding pointer in place."
     ;; FIXME? conses are 4 words when not in the cons area.
     (#.+tag-cons+ 2)
     (#.+tag-object+
-     (let* ((header (%array-like-ref-unsigned-byte-64 object -1))
-            (length (ldb (byte +array-length-size+ +array-length-shift+) header))
-            (type (ldb (byte +array-type-size+ +array-type-shift+) header)))
+     ;; Be careful extracting the length field, avoid creating bignums.
+     (let* ((header (%array-like-ref-t object -1))
+            (length (ldb (byte +array-length-size+ (- +array-length-shift+ +n-fixnum-bits+)) header))
+            (type (ldb (byte +array-type-size+ (- +array-type-shift+ +n-fixnum-bits+)) header)))
        ;; Dispatch again based on the type.
        (case type
          ((#.+object-tag-array-t+
@@ -898,7 +935,7 @@ a pointer to the new object. Leaves a forwarding pointer in place."
   (loop
      (when (>= start limit)
        (return nil))
-     (when (not (eql (logand (memref-unsigned-byte-64 start 0) +array-like-mark-bit+)
+     (when (not (eql (logand (memref-unsigned-byte-8 start 0) +array-like-mark-bit+)
                      *pinned-mark-bit*))
        ;; Not marked, must be free.
        (return start))
@@ -940,7 +977,7 @@ a pointer to the new object. Leaves a forwarding pointer in place."
                (setf (memref-signed-byte-64 current (+ i 2)) -1)))
            (return))
          ;; Test the mark bit.
-         (cond ((eql (logand (memref-unsigned-byte-64 next-addr 0) +array-like-mark-bit+)
+         (cond ((eql (logand (memref-unsigned-byte-8 next-addr 0) +array-like-mark-bit+)
                      *pinned-mark-bit*)
                 ;; Is marked, finish this entry and start the next one.
                 (setf next-addr (find-next-free-object current limit))
@@ -1028,7 +1065,12 @@ a pointer to the new object. Leaves a forwarding pointer in place."
                                                      (ash +address-tag-cons+ +address-tag-shift+))
                                              (- *cons-area-limit* new-limit))
     (setf *cons-area-limit* new-limit))
-  (setf *memory-expansion-remaining* *memory-expansion*)
+  (multiple-value-bind (n-free-blocks total-blocks)
+      (mezzano.supervisor:store-statistics)
+    (declare (ignore total-blocks))
+    ;; Always leave about 1MB worth of blocks free, need to update the block map & freelist.
+    (setf *memory-expansion-remaining* (logand (* (- n-free-blocks 256) #x1000) (lognot #x3FFFFF)))
+    (mezzano.supervisor:debug-print-line "Set *M-E-R* to " *memory-expansion-remaining* " (" n-free-blocks " blocks remain)"))
   (mezzano.supervisor:debug-print-line "GC complete")
   (mezzano.supervisor::set-gc-light nil))
 

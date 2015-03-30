@@ -36,30 +36,23 @@
 ;;    Spinlock protecting access to the thread.
 ;;  3 stack
 ;;    Stack object for the stack.
-;;  4 stack pointer
-;;    The thread's current RSP value. Not valid when :active or :dead. An SB64.
+;;  4 ** free (ish)
 ;;  5 Wait item.
 ;;    If a thread is sleeping or waiting for page, this will describe what it's waiting for.
 ;;    When waiting for paging to complete, this will be the faulting address.
 ;;  6 special stack pointer
 ;;    The thread's current special stack pointer.
 ;;    Note! The compiler must be updated if this changes and all code rebuilt.
-;;  7 preemption-disable-depth
-;;    Zero when the thread can be preempted, incremented each time the thread
-;;    disables preemption. A fixnum.
-;;    This must only be modified by the thread.
-;;  8 preemption-pending
-;;    Set when the thread should be preempted, but has a non-zero preemption-disable-depth. When p-d-d returns to 0, the thread will be preempted.
+;;  7 full-save-p
+;;    When true, all registers are saved in the the thread's state save area.
+;;    When false, only the stack pointer and frame pointer are valid.
+;;  8 ** free
 ;;  9 %next
 ;;    Forward link to the next thread in whatever list the thread is in.
 ;; 10 %prev
 ;;    Backward link to the previous thread in whatever list the thread is in.
-;; 11 foothold-disable-depth
-;;    Zero when ESTABLISH-THREAD-FOOTHOLD may break into the thread.
-;;    DESTROY-THREAD will also be unable to destroy the thread unless the abort option is set.
-;; 12 frame pointer
-;;    The thread's current RBP value. Not valid when :active or :dead. An SB64.
-;;    Here rather than on the stack to avoid GC problems during thread switch.
+;; 11 ** free
+;; 12 ** free
 ;; 13 mutex stack
 ;; 14 global-next
 ;; 15 global-prev
@@ -70,9 +63,30 @@
 ;; 128-426 TLS slots
 ;;    Slots used for bound symbol values.
 ;;    Note! The start of this area is known by the cold-generator.
-;; 427-446 Interrupt save area
+;; 427-446 State save area.
 ;;    Used to save an interrupt frame when the thread has stopped to wait for a page.
 ;;    The registers are saved here, not on the stack, because the stack may not be paged in.
+;;    This has the same layout as an interrupt frame.
+;;   +0 R15
+;;   +1 R14
+;;   +2 R13
+;;   +3 R12
+;;   +4 R11
+;;   +5 R10
+;;   +6 R9
+;;   +7 R8
+;;   +8 RDI
+;;   +9 RSI
+;;  +10 RBX
+;;  +11 RDX
+;;  +12 RCX
+;;  +13 RAX
+;;  +14 RBP (frame pointer)
+;;  +15 RIP
+;;  +16 CS
+;;  +17 RFLAGS
+;;  +18 RSP (stack pointer)
+;;  +19 SS
 ;; 447-510 FXSAVE area
 ;;    Unboxed area where the FPU/SSE state is saved.
 ;; COLD-GENERATOR::CREATE-INITIAL-THREAD must match.
@@ -98,23 +112,61 @@
                     (check-type thread thread)
                     ,@(when (not (eql type 't))
                         `((check-type value ,type)))
-                    (setf (,accessor thread ,field-name) value))))))
+                    (setf (,accessor thread ,field-name) value)))))
+          (reg-field (name offset)
+            (let ((state-name (intern (format nil "STATE-~A" name) (symbol-package name)))
+                  (state-name-value (intern (format nil "STATE-~A-VALUE" name) (symbol-package name))))
+              `(progn
+                 (field ,state-name ,offset :accessor sys.int::%array-like-ref-signed-byte-64)
+                 (field ,state-name-value ,offset :accessor sys.int::%array-like-ref-t)))))
   (field name                     0)
   (field state                    1 :type (member :active :runnable :sleeping :dead :waiting-for-page))
   (field lock                     2)
   (field stack                    3)
-  (field stack-pointer            4 :accessor sys.int::%array-like-ref-signed-byte-64)
+  ;; 4 - magic field used by bootloader.
   (field wait-item                5)
   (field special-stack-pointer    6)
-  (field preemption-disable-depth 7)
-  (field preemption-pending       8)
+  (field full-save-p              7)
+  ;; 8
   (field %next                    9)
   (field %prev                   10)
-  (field foothold-disable-depth  11)
-  (field frame-pointer           12 :accessor sys.int::%array-like-ref-signed-byte-64)
+  (field pending-footholds       11)
+  (field inhibit-footholds       12)
   (field mutex-stack             13)
   (field global-next             14)
-  (field global-prev             15))
+  (field global-prev             15)
+  (reg-field r15                427)
+  (reg-field r14                428)
+  (reg-field r13                429)
+  (reg-field r12                430)
+  (reg-field r11                431)
+  (reg-field r10                432)
+  (reg-field r9                 433)
+  (reg-field r8                 434)
+  (reg-field rdi                435)
+  (reg-field rsi                436)
+  (reg-field rbx                437)
+  (reg-field rdx                438)
+  (reg-field rcx                439)
+  (reg-field rax                440)
+  (reg-field rbp                441)
+  (reg-field rip                442)
+  (reg-field cs                 443)
+  (reg-field rflags             444)
+  (reg-field rsp                445)
+  (reg-field ss                 446))
+
+(defun thread-frame-pointer (thread)
+  (thread-state-rbp thread))
+
+(defun (setf thread-frame-pointer) (value thread)
+  (setf (thread-state-rbp thread) value))
+
+(defun thread-stack-pointer (thread)
+  (thread-state-rsp thread))
+
+(defun (setf thread-stack-pointer) (value thread)
+  (setf (thread-state-rsp thread) value))
 
 (defconstant +thread-mv-slots-start+ 32)
 (defconstant +thread-mv-slots-end+ 128)
@@ -123,72 +175,18 @@
 (defconstant +thread-interrupt-save-area+ 427)
 (defconstant +thread-fx-save-area+ 447)
 
-(defun thread-footholds-enabled-p (thread)
-  (zerop (thread-foothold-disable-depth thread)))
-
-(defmacro with-footholds-inhibited (&body body)
-  "Inhibit thread footholds within body."
-  `(call-with-footholds-inhibited
-    (flet ((%%with-footholds-inhibited-thunk%% ()
-             ,@body))
-      (declare (dynamic-extent #'%%with-footholds-inhibited-thunk%%))
-      #'%%with-footholds-inhibited-thunk%%)))
-
-(defmacro with-footholds-permitted (&body body)
-  "Permit thread footholds within body.
-Must only appear within the dynamic extent of a WITH-FOOTHOLDS-INHIBITED form."
-  `(call-with-footholds-permitted
-    (flet ((%%with-footholds-permitted-thunk%% ()
-             ,@body))
-      (declare (dynamic-extent #'%%with-footholds-permitted-thunk%%))
-      #'%%with-footholds-permitted-thunk%%)))
-
-(defun call-with-footholds-inhibited (thunk)
-  ;; Footholds are active at this point, so another thread may
-  ;; be able to establish a foothold which unwinds after the unwind-protect
-  ;; begins, but before with-thread-lock takes the thread lock.
-  ;; Use a variable to prevent decrementing the disable depth if this occurs.
-  (let ((self (current-thread))
-        (have-incremented nil))
-    (unwind-protect
-         (progn
-           (with-thread-lock (self)
-             (incf (thread-foothold-disable-depth self))
-             (setf have-incremented t))
-           (funcall thunk))
-      (when have-incremented
-        (with-thread-lock (self)
-          (decf (thread-foothold-disable-depth self)))
-        (when (zerop (thread-foothold-disable-depth self))
-          (establish-deferred-footholds self))))))
-
-(defun call-with-footholds-permitted (thunk)
-  (let ((self (current-thread)))
-    ;; Footholds are initially inhibited, no need for a protection variable.
-    (unwind-protect
-         (progn
-           (with-thread-lock (self)
-             (assert (not (zerop (thread-foothold-disable-depth self))))
-             (decf (thread-foothold-disable-depth self)))
-           ;; Establish any deferred footholds.
-           (when (zerop (thread-foothold-disable-depth self))
-             (establish-deferred-footholds self))
-           (funcall thunk))
-      (with-thread-lock (self)
-        (incf (thread-foothold-disable-depth self))))))
-
 (defmacro with-thread-lock ((thread) &body body)
   (let ((sym (gensym "thread")))
     `(let ((,sym ,thread))
-       (without-interrupts
-         (unwind-protect
-              (progn
-                (%lock-thread ,sym)
-                ,@body)
-           (%unlock-thread ,sym))))))
+       (unwind-protect
+            (progn
+              (%lock-thread ,sym)
+              ,@body)
+         (%unlock-thread ,sym)))))
 
 (defun %lock-thread (thread)
   (check-type thread thread)
+  (ensure-interrupts-disabled)
   (let ((current-thread (current-thread)))
     (do ()
         ((sys.int::%cas-array-like thread
@@ -234,7 +232,7 @@ Must only appear within the dynamic extent of a WITH-FOOTHOLDS-INHIBITED form."
 
 (defun make-thread (function &key name initial-bindings (stack-size (* 256 1024)))
   (check-type function (or function symbol))
-  ;; FIXME: need to make te GC aware of partially initialized threads.
+  ;; FIXME: need to make the GC aware of partially initialized threads.
   (let* ((thread (mezzano.runtime::%allocate-object sys.int::+object-tag-thread+ 0 511 :wired))
          (stack (%allocate-stack stack-size)))
     (setf (sys.int::%array-like-ref-t thread +thread-name+) name
@@ -243,11 +241,9 @@ Must only appear within the dynamic extent of a WITH-FOOTHOLDS-INHIBITED form."
           (sys.int::%array-like-ref-t thread +thread-stack+) stack
           (sys.int::%array-like-ref-t thread +thread-special-stack-pointer+) nil
           (sys.int::%array-like-ref-t thread +thread-wait-item+) nil
-          (sys.int::%array-like-ref-t thread +thread-preemption-disable-depth+) 0
-          (sys.int::%array-like-ref-t thread +thread-preemption-pending+) nil
-          ;; Decremented by the trampoline when it calls the thread function.
-          (sys.int::%array-like-ref-t thread +thread-foothold-disable-depth+) 1
-          (sys.int::%array-like-ref-t thread +thread-mutex-stack+) nil)
+          (sys.int::%array-like-ref-t thread +thread-mutex-stack+) nil
+          (sys.int::%array-like-ref-t thread +thread-pending-footholds+) '()
+          (sys.int::%array-like-ref-t thread +thread-inhibit-footholds+) 1)
     ;; Reset TLS slots.
     (dotimes (i (- +thread-tls-slots-end+ +thread-tls-slots-start+))
       (setf (sys.int::%array-like-ref-t thread (+ +thread-tls-slots-start+ i))
@@ -266,60 +262,67 @@ Must only appear within the dynamic extent of a WITH-FOOTHOLDS-INHIBITED form."
           #x037F) ; FCW
     (setf (ldb (byte 32 0) (sys.int::%array-like-ref-unsigned-byte-64 thread (+ +thread-fx-save-area+ 3)))
           #x00001F80) ; MXCSR
-    ;; Push initial state on the stack.
-    ;; This must match the frame %%switch-to-thread expects.
-    (let ((pointer (+ (stack-base stack) (stack-size stack))))
-      (flet ((push-t (value)
-               (setf (sys.int::memref-t (decf pointer 8) 0) value))
-             (push-ub64 (value)
-               (setf (sys.int::memref-unsigned-byte-64 (decf pointer 8) 0) value)))
-        ;; Function to run.
-        (push-t function)
-        ;; Saved RIP for %%switch-to-thread.
-        (push-ub64 (sys.int::%array-like-ref-unsigned-byte-64 #'%%thread-entry-trampoline 0)))
-      ;; Update the control stack pointer.
-      (setf (sys.int::%array-like-ref-unsigned-byte-64 thread +thread-stack-pointer+)
-            pointer)
-      (setf (sys.int::%array-like-ref-unsigned-byte-64 thread +thread-frame-pointer+) 0))
-    (with-symbol-spinlock (*global-thread-lock*)
-      (push-run-queue thread)
-      ;; Add thread to global thread list.
-      (setf (thread-global-prev *all-threads*) thread
-            (thread-global-next thread) *all-threads*
-            (thread-global-prev thread) nil
-            *all-threads* thread))
+    ;; Set up the initial register state.
+    (let ((stack-pointer (+ (stack-base stack) (stack-size stack)))
+          (trampoline #'thread-entry-trampoline))
+      ;; Push a fake return address on the stack, this keeps the stack aligned correctly.
+      (setf (sys.int::memref-unsigned-byte-64 (decf stack-pointer 8) 0) 0)
+      ;; Initialize state save area.
+      (setf (thread-state-ss thread) 0
+            (thread-state-rsp thread) stack-pointer
+            ;; Start with interrupts enabled.
+            (thread-state-rflags thread) #x202
+            ;; Kernel code segment (defined in cpu.lisp).
+            (thread-state-cs thread) 8
+            ;; Trampoline entry point.
+            (thread-state-rip thread) (sys.int::%array-like-ref-signed-byte-64 trampoline 0)
+            (thread-state-rax thread) 0
+            ;; 1 argument passed.
+            (thread-state-rcx-value thread) 1
+            (thread-state-rdx thread) 0
+            ;; FUNCALL calling convention.
+            (thread-state-rbx-value thread) trampoline
+            (thread-state-rsi thread) 0
+            (thread-state-rdi thread) 0
+            ;; First arg, function to call.
+            (thread-state-r8-value thread) function
+            (thread-state-r9 thread) 0
+            (thread-state-r10 thread) 0
+            (thread-state-r11 thread) 0
+            (thread-state-r12 thread) 0
+            (thread-state-r13 thread) 0
+            (thread-state-r14 thread) 0
+            (thread-state-r15 thread) 0))
+    (setf (thread-full-save-p thread) t)
+    (safe-without-interrupts (thread)
+      (with-symbol-spinlock (*global-thread-lock*)
+        (push-run-queue thread)
+        ;; Add thread to global thread list.
+        (setf (thread-global-prev *all-threads*) thread
+              (thread-global-next thread) *all-threads*
+              (thread-global-prev thread) nil
+              *all-threads* thread)))
     thread))
 
 (defun thread-entry-trampoline (function)
   (let ((self (current-thread)))
     (unwind-protect
          (catch 'terminate-thread
-           (with-footholds-permitted
-             (funcall function)))
+           (decf (thread-inhibit-footholds self))
+           (funcall function))
       ;; Cleanup, terminate the thread.
-      (sys.int::%cli)
-      (%lock-thread self)
-      (setf (thread-state self) :dead)
-      ;; Remove thread from the global list.
-      (with-symbol-spinlock (*global-thread-lock*)
-        (when (thread-global-next self)
-          (setf (thread-global-prev (thread-global-next self)) (thread-global-prev self)))
-        (when (thread-global-prev self)
-          (setf (thread-global-next (thread-global-prev self)) (thread-global-next self)))
-        (when (eql self *all-threads*)
-          (setf *all-threads* (thread-global-next self))))
-      (%reschedule))))
-
-(sys.int::define-lap-function %%thread-entry-trampoline ()
-  (:gc :no-frame :layout #*1)
-  ;; The regular stack contains the function to call.
-  (sys.lap-x86:pop :r8)
-  (:gc :no-frame)
-  ;; Call the high-level trampoline function.
-  (sys.lap-x86:mov64 :r13 (:function thread-entry-trampoline))
-  (sys.lap-x86:mov32 :ecx #.(ash 1 sys.int::+n-fixnum-bits+)) ; fixnum 1
-  (sys.lap-x86:call (:object :r13 #.sys.int::+fref-entry-point+))
-  (sys.lap-x86:ud2))
+      (safe-without-interrupts (self)
+        (%lock-thread self)
+        (setf (thread-state self) :dead)
+        ;; Remove thread from the global list.
+        (with-symbol-spinlock (*global-thread-lock*)
+          (when (thread-global-next self)
+            (setf (thread-global-prev (thread-global-next self)) (thread-global-prev self)))
+          (when (thread-global-prev self)
+            (setf (thread-global-next (thread-global-prev self)) (thread-global-next self)))
+          (when (eql self *all-threads*)
+            (setf *all-threads* (thread-global-next self))))
+        (%reschedule)))))
 
 ;; The idle thread is not a true thread. It does not appear in all-threads, nor in any run-queue.
 ;; When the machine boots, one idle thread is created for each core. When a core is idle, the
@@ -349,30 +352,45 @@ Must only appear within the dynamic extent of a WITH-FOOTHOLDS-INHIBITED form."
              (t ;; Wait for an interrupt.
               (sys.int::%stihlt))))))
 
-(sys.int::define-lap-function %%simple-thread-entry-trampoline ()
-  (:gc :no-frame :layout #*1)
-  ;; The regular stack contains the function to call.
-  (sys.lap-x86:pop :rbx)
-  (:gc :no-frame)
-  (sys.lap-x86:xor32 :ecx :ecx) ; fixnum 0
-  (sys.lap-x86:call (:object :rbx 0))
-  (sys.lap-x86:ud2))
-
 (defun reset-ephemeral-thread (thread entry-point state)
-  (let ((rsp (+ (stack-base (thread-stack thread))
-                (stack-size (thread-stack thread)))))
-    ;; Function to call.
-    (setf (sys.int::memref-t (decf rsp 8) 0) entry-point)
-    ;; Trampoline for switch threads.
-    (setf (sys.int::memref-signed-byte-64 (decf rsp 8) 0) (sys.int::%array-like-ref-signed-byte-64 #'%%simple-thread-entry-trampoline 0))
-    (setf (thread-stack-pointer thread) rsp
-          (thread-frame-pointer thread) 0))
+  ;; Set up the initial register state.
+  (let ((stack-pointer (+ (stack-base (thread-stack thread))
+                          (stack-size (thread-stack thread))))
+        (function (sys.int::%coerce-to-callable entry-point)))
+    ;; Push a fake return address on the stack, this keeps the stack aligned correctly.
+    (setf (sys.int::memref-unsigned-byte-64 (decf stack-pointer 8) 0) 0)
+    ;; Initialize state save area.
+    (setf (thread-state-ss thread) 0
+          (thread-state-rsp thread) stack-pointer
+          ;; Start with interrupts enabled.
+          (thread-state-rflags thread) #x202
+          ;; Kernel code segment (defined in cpu.lisp).
+          (thread-state-cs thread) 8
+          ;; Entry point.
+          (thread-state-rip thread) (sys.int::%array-like-ref-signed-byte-64 function 0)
+          (thread-state-rax thread) 0
+          ;; 0 arguments passed.
+          (thread-state-rcx-value thread) 0
+          (thread-state-rdx thread) 0
+          ;; FUNCALL calling convention.
+          (thread-state-rbx-value thread) function
+          (thread-state-rsi thread) 0
+          (thread-state-rdi thread) 0
+          (thread-state-r8 thread) 0
+          (thread-state-r9 thread) 0
+          (thread-state-r10 thread) 0
+          (thread-state-r11 thread) 0
+          (thread-state-r12 thread) 0
+          (thread-state-r13 thread) 0
+          (thread-state-r14 thread) 0
+          (thread-state-r15 thread) 0))
   (setf (thread-state thread) state
         (sys.int::%array-like-ref-t thread +thread-special-stack-pointer+) nil
         (sys.int::%array-like-ref-t thread +thread-wait-item+) nil
-        (sys.int::%array-like-ref-t thread +thread-preemption-disable-depth+) 1
-        (sys.int::%array-like-ref-t thread +thread-foothold-disable-depth+) 1
-        (sys.int::%array-like-ref-t thread +thread-mutex-stack+) nil)
+        (sys.int::%array-like-ref-t thread +thread-mutex-stack+) nil
+        (sys.int::%array-like-ref-t thread +thread-pending-footholds+) '()
+        (sys.int::%array-like-ref-t thread +thread-inhibit-footholds+) 1
+        (thread-full-save-p thread) t)
   ;; Initialize the FXSAVE area.
   ;; All FPU/SSE interrupts masked, round to nearest,
   ;; x87 using 80 bit precision (long-float).
@@ -393,7 +411,7 @@ Must only appear within the dynamic extent of a WITH-FOOTHOLDS-INHIBITED form."
     (setf *global-thread-lock* :unlocked)
     (setf *thread-run-queue-head* nil
           *thread-run-queue-tail* nil)
-    (setf *world-stop-lock* (make-mutex "World stop lock" :spin)
+    (setf *world-stop-lock* (make-mutex "World stop lock")
           *world-stop-resume-cvar* (make-condition-variable "World resume cvar")
           *world-stop-pa-exit-cvar* (make-condition-variable "World stop PA exit cvar")
           *world-stop-pending* nil
@@ -458,6 +476,52 @@ Interrupts must be off, the current thread must be locked."
                  ;; Fall back on idle.
                  sys.int::*bsp-idle-thread*))))))
 
+(defun %reschedule-via-wired-stack (sp fp)
+  ;; Interrupts must be off and the current thread's lock must be held.
+  ;; Releases the thread lock and reenables interrupts.
+  (let ((current (current-thread))
+        (next (%update-run-queue)))
+    ;; todo: reset preemption timer here.
+    (when (eql next current)
+      ;; Staying on the same thread, unlock and return.
+      (%unlock-thread current)
+      (%%return-to-same-thread sp fp)
+      (panic "unreachable"))
+    (when (<= sys.int::*exception-stack-base*
+              (thread-stack-pointer next)
+              (1- sys.int::*exception-stack-size*))
+      (panic "Other thread " next " stopped on exception stack!!!"))
+    (%lock-thread next)
+    (setf (thread-state next) :active)
+    (%%switch-to-thread-via-wired-stack current sp fp next)))
+
+(sys.int::define-lap-function %%return-to-same-thread ()
+  (sys.lap-x86:mov64 :rsp :r8)
+  (sys.lap-x86:mov64 :rbp :r9)
+  (sys.lap-x86:xor32 :ecx :ecx)
+  (sys.lap-x86:mov64 :r8 nil)
+  (sys.lap-x86:sti)
+  (:gc :no-frame)
+  (sys.lap-x86:ret))
+
+(sys.int::define-lap-function %%switch-to-thread-via-wired-stack ()
+  ;; Save frame pointer.
+  (sys.lap-x86:gs)
+  (sys.lap-x86:mov64 (:object nil #.+thread-state-rbp+) :r10)
+  ;; Save fpu state.
+  (sys.lap-x86:gs)
+  (sys.lap-x86:fxsave (:object nil #.+thread-fx-save-area+))
+  ;; Save stack pointer.
+  (sys.lap-x86:gs)
+  (sys.lap-x86:mov64 (:object nil #.+thread-state-rsp+) :r9)
+  ;; Only partial state was saved.
+  (sys.lap-x86:gs)
+  (sys.lap-x86:mov64 (:object nil #.+thread-full-save-p+) nil)
+  ;; Jump to common function.
+  (sys.lap-x86:mov64 :r9 :r11)
+  (sys.lap-x86:mov64 :r13 (:function %%switch-to-thread-common))
+  (sys.lap-x86:jmp (:r13 #.(+ (- sys.int::+tag-object+) 8 (* sys.int::+fref-entry-point+ 8)))))
+
 (defun %reschedule ()
   ;; Interrupts must be off and the current thread's lock must be held.
   ;; Releases the thread lock and reenables interrupts.
@@ -484,62 +548,19 @@ Interrupts must be off, the current thread must be locked."
   (:gc :no-frame)
   ;; Save frame pointer.
   (sys.lap-x86:gs)
-  (sys.lap-x86:mov64 (:object nil #.+thread-frame-pointer+) :rbp)
+  (sys.lap-x86:mov64 (:object nil #.+thread-state-rbp+) :rbp)
   ;; Save fpu state.
   (sys.lap-x86:gs)
   (sys.lap-x86:fxsave (:object nil #.+thread-fx-save-area+))
   ;; Save stack pointer.
   (sys.lap-x86:gs)
-  (sys.lap-x86:mov64 (:object nil #.+thread-stack-pointer+) :rsp)
-  ;; Switch threads.
-  (sys.lap-x86:mov32 :ecx #.sys.int::+msr-ia32-gs-base+)
-  (sys.lap-x86:mov64 :rax :r9)
-  (sys.lap-x86:mov64 :rdx :r9)
-  (sys.lap-x86:shr64 :rdx 32)
-  (sys.lap-x86:wrmsr)
-  ;; Restore stack pointer.
+  (sys.lap-x86:mov64 (:object nil #.+thread-state-rsp+) :rsp)
+  ;; Only partial state was saved.
   (sys.lap-x86:gs)
-  (sys.lap-x86:mov64 :rsp (:object nil #.+thread-stack-pointer+))
-  ;; Restore fpu state.
-  (sys.lap-x86:gs)
-  (sys.lap-x86:fxrstor (:object nil #.+thread-fx-save-area+))
-  ;; Drop the locks on both threads. Must be done before touching the thread stack.
-  (sys.lap-x86:mov64 :r10 (:constant :unlocked))
-  (sys.lap-x86:mov64 (:object :r9 #.+thread-lock+) :r10)
-  (sys.lap-x86:mov64 (:object :r8 #.+thread-lock+) :r10)
-  ;; Check if the thread is in the interrupt save area.
-  (sys.lap-x86:lea64 :rax (:object :r9 #.+thread-interrupt-save-area+))
-  (sys.lap-x86:cmp64 :rax :rsp)
-  (sys.lap-x86:je INTERRUPT-RESUME)
-  ;; Restore frame pointer.
-  (sys.lap-x86:gs)
-  (sys.lap-x86:mov64 :rbp (:object nil #.+thread-frame-pointer+))
-  ;; Reenable interrupts. Must be done before touching the thread stack.
-  (sys.lap-x86:sti)
-  ;; No value return.
-  (sys.lap-x86:xor32 :ecx :ecx)
-  (sys.lap-x86:mov64 :r8 nil)
-  ;; Return, restoring RIP.
-  (sys.lap-x86:ret)
-  ;; Returning to an interrupted thread. Restore saved registers and stuff.
-  INTERRUPT-RESUME
-  (:gc :frame :interrupt t)
-  (sys.lap-x86:pop :r15)
-  (sys.lap-x86:pop :r14)
-  (sys.lap-x86:pop :r13)
-  (sys.lap-x86:pop :r12)
-  (sys.lap-x86:pop :r11)
-  (sys.lap-x86:pop :r10)
-  (sys.lap-x86:pop :r9)
-  (sys.lap-x86:pop :r8)
-  (sys.lap-x86:pop :rdi)
-  (sys.lap-x86:pop :rsi)
-  (sys.lap-x86:pop :rbx)
-  (sys.lap-x86:pop :rdx)
-  (sys.lap-x86:pop :rcx)
-  (sys.lap-x86:pop :rax)
-  (sys.lap-x86:pop :rbp)
-  (sys.lap-x86:iret))
+  (sys.lap-x86:mov64 (:object nil #.+thread-full-save-p+) nil)
+  ;; Jump to common function.
+  (sys.lap-x86:mov64 :r13 (:function %%switch-to-thread-common))
+  (sys.lap-x86:jmp (:r13 #.(+ (- sys.int::+tag-object+) 8 (* sys.int::+fref-entry-point+ 8)))))
 
 (defun %reschedule-via-interrupt (interrupt-frame)
   ;; Interrupts must be off and the current thread's lock must be held.
@@ -556,10 +577,11 @@ Interrupts must be off, the current thread must be locked."
 
 (defun wake-thread (thread)
   "Wake a sleeping thread."
-  (with-thread-lock (thread)
-    (with-symbol-spinlock (*global-thread-lock*)
-      (setf (thread-state thread) :runnable)
-      (push-run-queue thread))))
+  (without-interrupts
+    (with-thread-lock (thread)
+      (with-symbol-spinlock (*global-thread-lock*)
+        (setf (thread-state thread) :runnable)
+        (push-run-queue thread)))))
 
 ;;; current-thread interrupt-frame next-thread
 ;;; Interrupts must be off, current & next must be locked.
@@ -576,43 +598,68 @@ Interrupts must be off, the current thread must be locked."
   (sys.lap-x86:mov32 :ecx 20) ; 20 values to copy.
   (sys.lap-x86:rep)
   (sys.lap-x86:movs64)
-  ;; Save stack pointer.
-  (sys.lap-x86:lea64 :rax (:object :r8 #.+thread-interrupt-save-area+))
+  ;; Full state was saved.
   (sys.lap-x86:gs)
-  (sys.lap-x86:mov64 (:object nil #.+thread-stack-pointer+) :rax)
+  (sys.lap-x86:mov64 (:object nil #.+thread-full-save-p+) t)
+  ;; Jump to common function.
+  (sys.lap-x86:mov64 :r9 :r10) ; next-thread
+  (sys.lap-x86:mov64 :r13 (:function %%switch-to-thread-common))
+  (sys.lap-x86:jmp (:r13 #.(+ (- sys.int::+tag-object+) 8 (* sys.int::+fref-entry-point+ 8)))))
+
+;; (current-thread new-thread)
+(sys.int::define-lap-function %%switch-to-thread-common ()
+  ;; Old thread's state has been saved, restore the new-thread's state.
   ;; Switch threads.
   (sys.lap-x86:mov32 :ecx #.sys.int::+msr-ia32-gs-base+)
-  (sys.lap-x86:mov64 :rax :r10)
-  (sys.lap-x86:mov64 :rdx :r10)
+  (sys.lap-x86:mov64 :rax :r9)
+  (sys.lap-x86:mov64 :rdx :r9)
   (sys.lap-x86:shr64 :rdx 32)
   (sys.lap-x86:wrmsr)
-  ;; Restore stack pointer.
-  (sys.lap-x86:gs)
-  (sys.lap-x86:mov64 :rsp (:object nil #.+thread-stack-pointer+))
   ;; Restore fpu state.
   (sys.lap-x86:gs)
   (sys.lap-x86:fxrstor (:object nil #.+thread-fx-save-area+))
   ;; Drop the locks on both threads. Must be done before touching the thread stack.
-  (sys.lap-x86:mov64 :r11 (:constant :unlocked))
-  (sys.lap-x86:mov64 (:object :r10 #.+thread-lock+) :r11)
-  (sys.lap-x86:mov64 (:object :r8 #.+thread-lock+) :r11)
+  (sys.lap-x86:mov64 :r10 (:constant :unlocked))
+  (sys.lap-x86:mov64 (:object :r9 #.+thread-lock+) :r10)
+  (sys.lap-x86:mov64 (:object :r8 #.+thread-lock+) :r10)
   ;; Check if the thread is in the interrupt save area.
-  (sys.lap-x86:lea64 :rax (:object :r10 #.+thread-interrupt-save-area+))
-  (sys.lap-x86:cmp64 :rax :rsp)
-  (sys.lap-x86:je INTERRUPT-RESUME)
+  (sys.lap-x86:gs)
+  (sys.lap-x86:cmp64 (:object nil #.+thread-full-save-p+) nil)
+  (sys.lap-x86:jne FULL-RESTORE)
+  ;; Restore stack pointer.
+  (sys.lap-x86:gs)
+  (sys.lap-x86:mov64 :rsp (:object nil #.+thread-state-rsp+))
   ;; Restore frame pointer.
   (sys.lap-x86:gs)
-  (sys.lap-x86:mov64 :rbp (:object nil #.+thread-frame-pointer+))
+  (sys.lap-x86:mov64 :rbp (:object nil #.+thread-state-rbp+))
   ;; Reenable interrupts. Must be done before touching the thread stack.
   (sys.lap-x86:sti)
+  (:gc :no-frame)
+  ;; Check for pending footholds.
+  (sys.lap-x86:gs)
+  (sys.lap-x86:cmp64 (:object nil #.+thread-pending-footholds+) nil)
+  (sys.lap-x86:jne RUN-FOOTHOLDS)
   ;; No value return.
+  NORMAL-RETURN
   (sys.lap-x86:xor32 :ecx :ecx)
   (sys.lap-x86:mov64 :r8 nil)
   ;; Return, restoring RIP.
   (sys.lap-x86:ret)
+  RUN-FOOTHOLDS
+  (sys.lap-x86:gs)
+  (sys.lap-x86:cmp64 (:object nil #.+thread-inhibit-footholds+) 0)
+  (sys.lap-x86:jne NORMAL-RETURN)
+  ;; Jump to the support function to run the footholds.
+  (sys.lap-x86:mov64 :r8 nil)
+  (sys.lap-x86:gs)
+  (sys.lap-x86:xchg64 (:object nil #.+thread-pending-footholds+) :r8)
+  (sys.lap-x86:mov32 :ecx #.(ash 1 sys.int::+n-fixnum-bits+))
+  (sys.lap-x86:mov64 :r13 (:function %run-thread-footholds))
+  (sys.lap-x86:jmp (:r13 #.(+ (- sys.int::+tag-object+) 8 (* sys.int::+fref-entry-point+ 8))))
   ;; Returning to an interrupted thread. Restore saved registers and stuff.
-  INTERRUPT-RESUME
-  (:gc :frame :interrupt t)
+  ;; TODO: How to deal with footholds here? The stack might be paged out here.
+  FULL-RESTORE
+  (sys.lap-x86:lea64 :rsp (:object :r9 #.+thread-interrupt-save-area+))
   (sys.lap-x86:pop :r15)
   (sys.lap-x86:pop :r14)
   (sys.lap-x86:pop :r13)
@@ -629,57 +676,6 @@ Interrupts must be off, the current thread must be locked."
   (sys.lap-x86:pop :rax)
   (sys.lap-x86:pop :rbp)
   (sys.lap-x86:iret))
-
-(defun establish-deferred-footholds (thread)
-  (declare (ignore self)))
-
-(defun establish-thread-foothold (thread function)
-  (cond ((eql thread (current-thread))
-         (assert (thread-footholds-enabled-p thread))
-         (funcall function))
-        (t (with-thread-lock (thread)
-             (tagbody
-              AGAIN
-                (ecase (thread-state thread)
-                  ;; todo: SMP.
-                  (:active (error "what?"))
-                  (:runnable
-                   ;; Wait for the thread to allow footholds.
-                   (do ()
-                       ((thread-footholds-enabled-p thread))
-                     ;; Drop the lock & reschedule.
-                     (%unlock-thread thread)
-                     (sys.int::%sti)
-                     (thread-yield)
-                     (sys.int::%cli)
-                     (%lock-thread thread)
-                     (go AGAIN))
-                   ;; Top stack element is the rbp, 2nd is return rip.
-                   (let* ((rsp (thread-stack-pointer thread))
-                          (rbp (sys.int::memref-signed-byte-64 rsp 0)))
-                     ;; %%SWITCH-TO-THREAD is kind enough to clear rcx for us,
-                     ;; so no thunk required.
-                     ;; +1 RIP
-                     ;; +0 RBP
-                     ;; becomes
-                     ;; +2 RIP
-                     ;; +1 function-entry
-                     ;; +0 RBP
-                     (setf (sys.int::memref-signed-byte-64 rsp 0)
-                           (sys.int::%array-like-ref-signed-byte-64 (sys.int::%coerce-to-callable function) 0))
-                     (setf (sys.int::memref-signed-byte-64 rsp -1) rbp)
-                     (setf (sys.int::%array-like-ref-signed-byte-64 thread +thread-stack-pointer+) (- rsp 8))))
-                  ;; todo.
-                  (:sleeping (error "Thread is sleeping."))
-                  (:dead (error "Trying to interrupt dead thread."))))))))
-
-(defun destroy-thread (thread &optional abort)
-  "Terminate THREAD.
-If abort is false, then cleanup forms will be run before the thread exits;
-otherwise the thread will exit immediately, and not execute cleanup forms."
-  (establish-thread-foothold thread
-                             (lambda ()
-                               (throw 'terminate-thread nil))))
 
 (defun initialize-initial-thread ()
   "Called very early after boot to reset the initial thread."
@@ -713,6 +709,43 @@ otherwise the thread will exit immediately, and not execute cleanup forms."
        list)
     (push current list)))
 
+(defun %pop-foothold ()
+  (safe-without-interrupts ()
+    (pop (thread-pending-footholds (current-thread)))))
+
+(defun %run-thread-footholds (footholds)
+  (loop
+     for fn in footholds
+     do (funcall fn))
+  (values))
+
+(defmacro without-footholds (&body body)
+  (let ((thread (gensym)))
+    `(unwind-protect
+          (progn
+            (sys.int::%atomic-fixnum-add-array-like (current-thread) +thread-inhibit-footholds+ 1)
+            ,@body)
+       (let ((,thread (current-thread)))
+         (sys.int::%atomic-fixnum-add-array-like ,thread +thread-inhibit-footholds+ -1)
+         (when (and (zerop (sys.int::%array-like-ref-t ,thread +thread-inhibit-footholds+))
+                    (sys.int::%array-like-ref-t ,thread +thread-pending-footholds+))
+           (%run-thread-footholds (sys.int::%xchg-array-like ,thread +thread-pending-footholds+ nil)))))))
+
+(defun establish-thread-foothold (thread function)
+  (loop
+     (let ((old (thread-pending-footholds thread)))
+       ;; Use CAS to avoid having to disable interrupts/lock the thread/etc.
+       ;; Tricky to mix with allocation.
+       (when (sys.int::%cas-array-like thread +thread-pending-footholds+
+                                       old (cons function old))
+         (return)))))
+
+(defun terminate-thread (thread)
+  (establish-thread-foothold
+   thread
+   (lambda ()
+     (throw 'terminate-thread nil))))
+
 (defmacro dx-lambda (lambda-list &body body)
   `(flet ((dx-lambda ,lambda-list ,@body))
      (declare (dynamic-extent #'dx-lambda))
@@ -727,6 +760,7 @@ otherwise the thread will exit immediately, and not execute cleanup forms."
       (panic "Nested world stop!"))
     (when *pseudo-atomic*
       (panic "Stopping world while pseudo-atomic!"))
+    (ensure-interrupts-enabled)
     (with-mutex (*world-stop-lock*)
       ;; First, try to position ourselves as the next thread to stop the world.
       ;; This prevents any more threads from becoming PA.
@@ -757,6 +791,7 @@ otherwise the thread will exit immediately, and not execute cleanup forms."
 (defun call-with-pseudo-atomic (thunk)
   (when (eql *world-stopper* (current-thread))
     (panic "Going PA with world stopped!"))
+  (ensure-interrupts-enabled)
   (with-mutex (*world-stop-lock*)
     (when *world-stop-pending*
       ;; Wait for the world to stop & resume.
@@ -775,10 +810,10 @@ otherwise the thread will exit immediately, and not execute cleanup forms."
   `(call-with-pseudo-atomic (dx-lambda () ,@body)))
 
 ;;; Common structure for sleepable things.
-(defstruct wait-queue
+(defstruct (wait-queue
+             (:area :wired))
   name
-  ;; Spin mutexes also abuse this field as a place to store the old interrupt state.
-  (%lock :unlocked) ; must be 2nd slot.
+  (%lock (place-spinlock-initializer))
   (head nil)
   (tail nil))
 
@@ -805,128 +840,89 @@ otherwise the thread will exit immediately, and not execute cleanup forms."
       thread)))
 
 (defun lock-wait-queue (wait-queue)
-  (do ((current-thread (current-thread)))
-      ((sys.int::%cas-array-like wait-queue
-                                 2
-                                 :unlocked
-                                 current-thread))
-    (sys.int::cpu-relax)))
+  (acquire-place-spinlock (wait-queue-%lock wait-queue)))
 
 (defun unlock-wait-queue (wait-queue)
-  (setf (wait-queue-%lock wait-queue) :unlocked))
+  (release-place-spinlock (wait-queue-%lock wait-queue)))
 
 (defmacro with-wait-queue-lock ((wait-queue) &body body)
   (let ((sym (gensym "WAIT-QUEUE")))
     `(let ((,sym ,wait-queue))
-       (without-interrupts
-         (unwind-protect
-              (progn
-                (lock-wait-queue ,sym)
-                ,@body)
-           (unlock-wait-queue ,sym))))))
+       (unwind-protect
+            (progn
+              (lock-wait-queue ,sym)
+              ,@body)
+         (unlock-wait-queue ,sym)))))
 
 (defstruct (mutex
              (:include wait-queue)
-             (:constructor make-mutex (&optional name (kind :block)))
+             (:constructor make-mutex (&optional name))
              (:area :wired))
   ;; When NIL, the lock is free, otherwise is set to
   ;; the thread that holds the lock.
   (owner nil) ; must be slot 5, after wait-queue is included.
-  (kind nil :type (member :block :spin) :read-only t)
   (stack-next nil))
 
 (defun acquire-mutex (mutex &optional (wait-p t))
-  (ecase (mutex-kind mutex)
-    (:block (acquire-block-mutex mutex wait-p))
-    (:spin (acquire-spin-mutex mutex wait-p))))
-
-(defun acquire-block-mutex (mutex wait-p)
   (let ((self (current-thread)))
-    (unless (sys.int::%interrupt-state)
-      (panic "Trying to acquire block mutex " mutex " with interrupts disabled."))
-    (unless (not (thread-footholds-enabled-p self))
-      (panic "Trying to acquire block mutex " mutex " with footholds enabled."))
+    (ensure-interrupts-enabled)
     (unless (not *pseudo-atomic*)
-      (panic "Trying to acquire block mutex " mutex " while pseudo-atomic."))
+      (panic "Trying to acquire mutex " mutex " while pseudo-atomic."))
     ;; Fast path - try to lock.
     (when (sys.int::%cas-struct-slot mutex 5 nil self)
       ;; We got it.
       (setf (mutex-stack-next mutex) (thread-mutex-stack self)
             (thread-mutex-stack self) mutex)
-      (return-from acquire-block-mutex t))
+      (return-from acquire-mutex t))
     ;; Idiot check.
     (unless (not (mutex-held-p mutex))
       (error "Recursive locking detected on ~S." mutex))
     (when wait-p
-      ;; Slow path.
-      (sys.int::%cli)
-      (lock-wait-queue mutex)
-      ;; Try to acquire again, release may have been running.
-      (when (sys.int::%cas-struct-slot mutex 5 nil self)
-        ;; We got it.
-        (setf (mutex-stack-next mutex) (thread-mutex-stack self)
-              (thread-mutex-stack self) mutex)
-        (sys.int::%sti)
-        (unlock-wait-queue mutex)
-        (return-from acquire-block-mutex t))
-      ;; No good, have to sleep.
-      ;; Add to wait queue. Release will directly transfer ownership
-      ;; to this thread.
-      (push-wait-queue self mutex)
-      ;; Now sleep.
-      ;; Must take the thread lock before dropping the mutex lock or release
-      ;; may be able to remove the thread from the sleep queue before it goes
-      ;; to sleep.
-      ;; todo: reenable footholds when the thread is sleeping, but only one level.
-      (%lock-thread self)
-      ;; Do some deadlock detection before going to sleep. If the current owner
-      ;; is blocked on a mutex held by self, then a deadlock has occurred.
-      (let ((owner (mutex-owner mutex)))
-        (with-thread-lock (owner)
-          (when (eql (thread-state owner) :sleeping)
-            (do ((lock (thread-mutex-stack self) (mutex-stack-next lock)))
-                ((null lock))
-              (when (eql lock (thread-wait-item owner))
-                (%unlock-thread owner)
-                (%unlock-thread self)
-                (pop-wait-queue mutex)
-                (unlock-wait-queue mutex)
-                (sys.int::%sti)
-                (panic "Deadlock detected!~%~
-Current thread ~S locking ~S, held by ~S, waiting on lock ~S!"
-                       current
-                       mutex
-                       owner
-                       lock))))))
-      (unlock-wait-queue mutex)
-      (setf (thread-wait-item self) mutex
-            (thread-state self) :sleeping)
-      (%reschedule)
+      (%call-on-wired-stack-without-interrupts
+       #'acquire-mutex-slow-path nil mutex self)
       t)))
 
-(defun acquire-spin-mutex (mutex wait-p)
-  (let ((self (current-thread))
-        (istate (sys.int::%interrupt-state)))
-    (sys.int::%cli)
-    ;; Fast path - try to lock.
-    (when (sys.int::%cas-struct-slot mutex 5 nil self)
-      ;; We got it.
-      (setf (mutex-%lock mutex) istate)
-      (return-from acquire-spin-mutex t))
-    ;; Idiot check.
-    (unless (not (mutex-held-p mutex))
-      (panic "Recursive locking detected."))
-    (panic "Spin-mutex " mutex " held by " (mutex-owner mutex))
-    (cond (wait-p
-           ;; Spin path.
-           (do ()
-               ((sys.int::%cas-struct-slot mutex 5 nil self))
-             (sys.int::cpu-relax))
-           (setf (mutex-%lock mutex) istate)
-           t)
-          (t ;; Trylock path.
-           (when istate
-             (sys.int::%sti))))))
+(defun acquire-mutex-slow-path (sp fp mutex self)
+  ;; Slow path.
+  (lock-wait-queue mutex)
+  ;; Try to acquire again, release may have been running.
+  (when (sys.int::%cas-struct-slot mutex 5 nil self)
+    ;; We got it.
+    (setf (mutex-stack-next mutex) (thread-mutex-stack self)
+          (thread-mutex-stack self) mutex)
+    (unlock-wait-queue mutex)
+    (return-from acquire-mutex-slow-path))
+  ;; No good, have to sleep.
+  ;; Add to wait queue. Release will directly transfer ownership
+  ;; to this thread.
+  (push-wait-queue self mutex)
+  ;; Now sleep.
+  ;; Must take the thread lock before dropping the mutex lock or release
+  ;; may be able to remove the thread from the sleep queue before it goes
+  ;; to sleep.
+  (%lock-thread self)
+  ;; Do some deadlock detection before going to sleep. If the current owner
+  ;; is blocked on a mutex held by self, then a deadlock has occurred.
+  (let ((owner (mutex-owner mutex)))
+    (with-thread-lock (owner)
+      (when (eql (thread-state owner) :sleeping)
+        (do ((lock (thread-mutex-stack self) (mutex-stack-next lock)))
+            ((null lock))
+          (when (eql lock (thread-wait-item owner))
+            (%unlock-thread owner)
+            (%unlock-thread self)
+            (pop-wait-queue mutex)
+            (unlock-wait-queue mutex)
+            (panic "Deadlock detected!~%~
+Current thread ~S locking ~S, held by ~S, waiting on lock ~S!"
+                   current
+                   mutex
+                   owner
+                   lock))))))
+  (unlock-wait-queue mutex)
+  (setf (thread-wait-item self) mutex
+        (thread-state self) :sleeping)
+  (%reschedule-via-wired-stack sp fp))
 
 (defun mutex-held-p (mutex)
   "Return true if this thread holds MUTEX."
@@ -934,63 +930,32 @@ Current thread ~S locking ~S, held by ~S, waiting on lock ~S!"
 
 (defun release-mutex (mutex)
   (unless (mutex-held-p mutex)
-    (panic "Tryin to release mutex " mutex " not held by thread."))
-  (ecase (mutex-kind mutex)
-    (:block (release-block-mutex mutex))
-    (:spin (release-spin-mutex mutex)))
+    (panic "Trying to release mutex " mutex " not held by thread."))
+  (safe-without-interrupts (mutex)
+    (with-wait-queue-lock (mutex)
+      (let ((self (current-thread)))
+        (when (not (eql mutex (thread-mutex-stack self)))
+          (panic "Thread " self " releasing mutex " mutex " out of order."))
+        (setf (thread-mutex-stack self) (mutex-stack-next mutex)))
+      ;; Look for a thread to wake.
+      (let ((thread (pop-wait-queue mutex)))
+        (cond (thread
+               ;; Found one, wake it & transfer the lock.
+               (setf (mutex-owner mutex) thread)
+               (setf (mutex-stack-next mutex) (thread-mutex-stack thread)
+                     (thread-mutex-stack thread) mutex)
+               (wake-thread thread))
+              (t
+               ;; No threads sleeping, just drop the lock.
+               (setf (mutex-owner mutex) nil))))))
   (values))
 
-(defun release-block-mutex (mutex)
-  (with-wait-queue-lock (mutex)
-    (let ((self (current-thread)))
-      (when (not (eql mutex (thread-mutex-stack self)))
-        (panic "Thread " self " releasing mutex " mutex " out of order."))
-      (setf (thread-mutex-stack self) (mutex-stack-next mutex)))
-    ;; Look for a thread to wake.
-    (let ((thread (pop-wait-queue mutex)))
-      (cond (thread
-             ;; Found one, wake it & transfer the lock.
-             (setf (mutex-owner mutex) thread)
-             (setf (mutex-stack-next mutex) (thread-mutex-stack thread)
-                   (thread-mutex-stack thread) mutex)
-             (wake-thread thread))
-            (t
-             ;; No threads sleeping, just drop the lock.
-             (setf (mutex-owner mutex) nil))))))
-
-(defun release-spin-mutex (mutex)
-  (let ((istate (mutex-%lock mutex)))
-    (setf (mutex-owner mutex) nil)
-    (when istate
-      (sys.int::%sti))))
-
 (defun call-with-mutex (thunk mutex wait-p)
-  (ecase (mutex-kind mutex)
-    (:block (call-with-block-mutex thunk mutex wait-p))
-    (:spin (call-with-spin-mutex thunk mutex wait-p))))
-
-(defun call-with-block-mutex (thunk mutex wait-p)
-  (let ((got-it nil))
-    ;; Disable footholds while taking the lock, this prevents a
-    ;; foothold from running after the mutex has been locked, but
-    ;; before GOT-IT has been set to true. If it were to unwind
-    ;; at that point, then the mutex would never be released.
-    (with-footholds-inhibited
-      (unwind-protect
-           (when (setf got-it (acquire-mutex mutex wait-p))
-             (with-footholds-permitted
-               (funcall thunk)))
-        (when got-it
-          (release-mutex mutex))))))
-
-(defun call-with-spin-mutex (thunk mutex wait-p)
-  ;; No foothold messing around required here. These locks disable interrupts.
-  (let ((got-it nil))
-    (unwind-protect
-         (when (setf got-it (acquire-mutex mutex wait-p))
-           (funcall thunk))
-      (when got-it
-        (release-mutex mutex)))))
+  (unwind-protect
+       (when (acquire-mutex mutex wait-p)
+         (funcall thunk))
+    (when (mutex-held-p mutex)
+      (release-mutex mutex))))
 
 (defmacro with-mutex ((mutex &optional (wait-p t)) &body body)
   "Run body with MUTEX locked.
@@ -1009,57 +974,49 @@ May be used from an interrupt handler when WAIT-P is false or if MUTEX is a spin
 
 (defun condition-wait (condition-variable mutex)
   (assert (mutex-held-p mutex))
-  (ecase (mutex-kind mutex)
-    ;; Interrupts must be enabled.
-    (:block (assert (sys.int::%interrupt-state)))
-    ;; Interrupts must have been enabled when the lock was taken.
-    ;; TODO: Track how many spin mutexes are currently taken and assert when
-    ;; count != 1.
-    (:spin (assert (mutex-%lock mutex))))
-  (let ((self (current-thread))
-        (prior-istate (mutex-%lock mutex)))
-    (with-footholds-inhibited
-      (sys.int::%cli)
-      (lock-wait-queue condition-variable)
-      (%lock-thread self)
-      ;; Attach to the list.
-      (push-wait-queue self condition-variable)
-      ;; Drop the mutex.
-      ;; Make sure spin mutexes don't reenable interrupts.
-      (when (eql (mutex-kind mutex) :spin)
-        (setf (mutex-%lock mutex) nil))
-      (release-mutex mutex)
-      ;; Sleep.
-      ;; todo: reenable footholds when the thread is sleeping, but only one level.
-      ;; need to be careful with that, returning or unwinding from condition-wait
-      ;; with the lock unlocked would be quite bad.
-      (setf (thread-wait-item self) condition-variable
-            (thread-state self) :sleeping)
-      (unlock-wait-queue condition-variable)
-      (%reschedule)
-      ;; Got woken up. Reacquire the mutex.
-      (acquire-mutex mutex t)
-      ;; And restore :spin istate.
-      (when (eql (mutex-kind mutex) :spin)
-        (setf (mutex-%lock mutex) prior-istate))))
+  (ensure-interrupts-enabled)
+  (unwind-protect
+       (%call-on-wired-stack-without-interrupts
+        (lambda (sp fp condition-variable mutex)
+          (let ((self (current-thread)))
+            (lock-wait-queue condition-variable)
+            (%lock-thread self)
+            ;; Attach to the list.
+            (push-wait-queue self condition-variable)
+            ;; Drop the mutex.
+            (release-mutex mutex)
+            ;; Sleep.
+            ;; need to be careful with that, returning or unwinding from condition-wait
+            ;; with the lock unlocked would be quite bad.
+            (setf (thread-wait-item self) condition-variable
+                  (thread-state self) :sleeping)
+            (unlock-wait-queue condition-variable)
+            (%reschedule-via-wired-stack sp fp)))
+        nil condition-variable mutex)
+    ;; Got woken up. Reacquire the mutex.
+    ;; Slightly tricky, if the thread was interrupted and unwound before
+    ;; interrupts were disabled, then the mutex won't have been released.
+    (when (not (mutex-held-p mutex))
+      (acquire-mutex mutex t)))
   (values))
 
 (defun condition-notify (condition-variable &optional broadcast)
   "Wake one or many threads waiting on CONDITION-VARIABLE.
 May be used from an interrupt handler, assuming the associated mutex is interrupt-safe."
-  (flet ((pop-one ()
-           (wake-thread (pop-wait-queue condition-variable))))
-    (declare (dynamic-extent #'pop-one))
-    (with-wait-queue-lock (condition-variable)
-      (cond (broadcast
-             ;; Loop until all the threads have been woken.
-             (do ()
-                 ((null (condition-variable-head condition-variable)))
-               (pop-one)))
-            (t
-             ;; Wake exactly one.
-             (when (condition-variable-head condition-variable)
-               (pop-one))))))
+  (safe-without-interrupts (condition-variable broadcast)
+    (flet ((pop-one ()
+             (wake-thread (pop-wait-queue condition-variable))))
+      (declare (dynamic-extent #'pop-one))
+      (with-wait-queue-lock (condition-variable)
+        (cond (broadcast
+               ;; Loop until all the threads have been woken.
+               (do ()
+                   ((null (condition-variable-head condition-variable)))
+                 (pop-one)))
+              (t
+               ;; Wake exactly one.
+               (when (condition-variable-head condition-variable)
+                 (pop-one)))))))
   (values))
 
 (defstruct (semaphore
@@ -1082,56 +1039,154 @@ May be used from an interrupt handler."
              (incf (semaphore-value semaphore)))))))
 
 (defun semaphore-down (semaphore &optional (wait-p t))
-  (let ((self (current-thread)))
-    (assert (sys.int::%interrupt-state))
-    (assert (not (thread-footholds-enabled-p self)))
-    (sys.int::%cli)
-    (lock-wait-queue semaphore)
-    (when (not (zerop (semaphore-value semaphore)))
-      (decf (semaphore-value semaphore))
-      (unlock-wait-queue semaphore)
-      (sys.int::%sti)
-      (return-from semaphore-down t))
-    (cond (wait-p
-           ;; Go to sleep.
-           (push-wait-queue self mutex)
-           ;; Now sleep.
-           ;; Must take the thread lock before dropping the semaphore lock or up
-           ;; may be able to remove the thread from the sleep queue before it goes
-           ;; to sleep.
-           ;; todo: reenable footholds when the thread is sleeping, but only one level.
-           (%lock-thread self)
-           (unlock-wait-queue semaphore)
-           (setf (thread-wait-item self) semaphore
-                 (thread-state self) :sleeping)
-           (%reschedule)
-           t)
-          (t (unlock-wait-queue semaphore)
-             (sys.int::%sti)
-             nil))))
+  (ensure-interrupts-enabled)
+  ;; Invert the result here because %RESCHEDULE-VIA-WIRED-STACK will always
+  ;; cause %C-O-W-S-W-I to return NIL, which is actually a success result.
+  (not (%call-on-wired-stack-without-interrupts
+        (lambda (sp fp semaphore wait-p)
+          (let ((self (current-thread)))
+            (lock-wait-queue semaphore)
+            (cond ((not (zerop (semaphore-value semaphore)))
+                   (decf (semaphore-value semaphore))
+                   (unlock-wait-queue semaphore)
+                   nil)
+                  (wait-p
+                   ;; Go to sleep.
+                   (push-wait-queue self semaphore)
+                   ;; Now sleep.
+                   ;; Must take the thread lock before dropping the semaphore lock or up
+                   ;; may be able to remove the thread from the sleep queue before it goes
+                   ;; to sleep.
+                   (%lock-thread self)
+                   (unlock-wait-queue semaphore)
+                   (setf (thread-wait-item self) semaphore
+                         (thread-state self) :sleeping)
+                   (%reschedule-via-wired-stack sp fp))
+                  (t (unlock-wait-queue semaphore)
+                     t))))
+          nil semaphore wait-p)))
 
-(defstruct (fifo
+(defstruct (latch
+             (:include wait-queue)
+             (:constructor make-latch (&optional name))
+             (:area :wired))
+  (state nil))
+
+(defun latch-reset (latch)
+  (safe-without-interrupts (latch)
+    (with-wait-queue-lock (latch)
+      (setf (latch-state latch) nil))))
+
+(defun latch-wait (latch)
+  (when (latch-state latch)
+    (return-from latch-wait))
+  (ensure-interrupts-enabled)
+  (%call-on-wired-stack-without-interrupts
+   (lambda (sp fp latch)
+     (let ((self (current-thread)))
+       (lock-wait-queue latch)
+       (cond ((latch-state latch)
+              ;; Latch was opened after the wait-queue was locked.
+              ;; Don't sleep.
+              (unlock-wait-queue latch))
+             (t ;; Latch is closed, sleep.
+              (%lock-thread self)
+              ;; Attach to the list.
+              (push-wait-queue self latch)
+              ;; Sleep.
+              (setf (thread-wait-item self) latch
+                    (thread-state self) :sleeping)
+              (unlock-wait-queue latch)
+              (%reschedule-via-wired-stack sp fp)))))
+   nil latch)
+  (values))
+
+(defun latch-trigger (latch)
+  (safe-without-interrupts (latch)
+    (with-wait-queue-lock (latch)
+      (setf (latch-state latch) t)
+      ;; Loop until all the threads have been woken.
+      (do ()
+          ((null (condition-variable-head latch)))
+        (wake-thread (pop-wait-queue latch))))))
+
+(defstruct (irq-fifo
              (:area :wired)
-             (:constructor %make-fifo))
+             (:constructor %make-irq-fifo))
   (head 0 :type fixnum)
   (tail 0 :type fixnum)
   (size)
   (element-type)
   (buffer (error "no buffer supplied") :read-only t)
-  (cv (make-condition-variable))
-  (lock (make-mutex "fifo-lock" :spin)))
+  (count (make-semaphore 0))
+  (lock (place-spinlock-initializer)))
 
-(defun make-fifo (size &key (element-type 't))
+(defun make-irq-fifo (size &key (element-type 't))
   ;; TODO: non-t element types.
-  (%make-fifo :size size
-              :buffer (sys.int::make-simple-vector size :wired)
-              :element-type 't))
+  (%make-irq-fifo :size size
+                  :buffer (sys.int::make-simple-vector size :wired)
+                  :element-type 't))
+
+(defun irq-fifo-push (value fifo)
+  "Push a byte onto FIFO. Returns true if there was space adn value was pushed successfully.
+If the fifo is full, then FIFO-PUSH will return false.
+Safe to use from an interrupt handler."
+  (safe-without-interrupts (value fifo)
+    (with-place-spinlock ((irq-fifo-lock fifo))
+      (let ((next (1+ (irq-fifo-tail fifo))))
+        (when (>= next (irq-fifo-size fifo))
+          (setf next 0))
+        ;; When next reaches head, the buffer is full.
+        (unless (= next (irq-fifo-head fifo))
+          (setf (svref (irq-fifo-buffer fifo) (irq-fifo-tail fifo)) value
+                (irq-fifo-tail fifo) next)
+          (semaphore-up (irq-fifo-count fifo))
+          t)))))
+
+(defun irq-fifo-pop (fifo &optional (wait-p t))
+  "Pop a byte from FIFO.
+Returns two values. The first value is the value popped from the FIFO.
+The second value is true if a value was popped, false otherwise.
+It is only possible for the second value to be false when wait-p is false."
+  (when (not (semaphore-down (irq-fifo-count fifo) wait-p))
+    (return-from irq-fifo-pop
+      (values nil nil)))
+  (safe-without-interrupts (fifo)
+    (with-place-spinlock ((irq-fifo-lock fifo))
+      ;; FIFO must not be empty.
+      (ensure (not (eql (irq-fifo-head fifo) (irq-fifo-tail fifo))))
+      ;; Pop byte.
+      (let ((value (svref (irq-fifo-buffer fifo) (irq-fifo-head fifo)))
+            (next (1+ (irq-fifo-head fifo))))
+        (when (>= next (irq-fifo-size fifo))
+          (setf next 0))
+        (setf (irq-fifo-head fifo) next)
+        (values value t)))))
+
+(defun irq-fifo-reset (fifo)
+  "Flush any waiting data."
+  (loop
+     (multiple-value-bind (value validp)
+         (irq-fifo-pop fifo nil)
+       (declare (ignore value))
+       (when (not validp)
+         (return)))))
+
+(defstruct (fifo
+             (:area :wired)
+             (:constructor (make-fifo (size &key (element-type 't) &aux (buffer (make-array size :element-type element-type))))))
+  (head 0 :type fixnum)
+  (tail 0 :type fixnum)
+  (size nil :read-only t)
+  (element-type nil :read-only t)
+  (buffer nil :read-only t)
+  (cv (make-condition-variable))
+  (lock (make-mutex "fifo-lock")))
 
 (defun fifo-push (value fifo &optional (wait-p t))
   "Push a byte onto FIFO. Returns true if successful.
 If the fifo is full, then FIFO-PUSH will wait for space to become available
-when WAIT-P is true, otherwise it will immediately return false.
-May be used from an interrupt handler if WAIT-P is false."
+when WAIT-P is true, otherwise it will immediately return false."
   (with-mutex ((fifo-lock fifo))
     (loop
        (let ((next (1+ (fifo-tail fifo))))
@@ -1139,7 +1194,7 @@ May be used from an interrupt handler if WAIT-P is false."
            (setf next 0))
          ;; When next reaches head, the buffer is full.
          (unless (= next (fifo-head fifo))
-           (setf (svref (fifo-buffer fifo) (fifo-tail fifo)) value
+           (setf (aref (fifo-buffer fifo) (fifo-tail fifo)) value
                  (fifo-tail fifo) next)
            (condition-notify (fifo-cv fifo))
            (return t)))
@@ -1152,13 +1207,12 @@ May be used from an interrupt handler if WAIT-P is false."
   "Pop a byte from FIFO.
 Returns two values. The first value is the value popped from the FIFO.
 The second value is true if a value was popped, false otherwise.
-It is only possible for the second value to be false when wait-p is false.
-May be used from an interrupt handler if WAIT-P is false."
+It is only possible for the second value to be false when wait-p is false."
   (with-mutex ((fifo-lock fifo))
     (loop
        (when (not (eql (fifo-head fifo) (fifo-tail fifo)))
          ;; Fifo not empty, pop byte.
-         (let ((value (svref (fifo-buffer fifo) (fifo-head fifo)))
+         (let ((value (aref (fifo-buffer fifo) (fifo-head fifo)))
                (next (1+ (fifo-head fifo))))
            (when (>= next (fifo-size fifo))
              (setf next 0))
@@ -1172,8 +1226,7 @@ May be used from an interrupt handler if WAIT-P is false."
                        (fifo-lock fifo)))))
 
 (defun fifo-reset (fifo)
-  "Flush any waiting data.
-May be used from an interrupt handler."
+  "Flush any waiting data."
   (with-mutex ((fifo-lock fifo))
     (setf (fifo-head fifo) 0
           (fifo-tail fifo) 0)

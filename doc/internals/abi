@@ -6,7 +6,7 @@ RAX, RCX, RDX, RSI, and RDI are all caller-save and only store immediate or
 raw values. These registers were chosen because they're all used as implicit
 operands in a number of x86 instructions. They are never scanned by the GC.
 Exception: CMPXCHG and CMPXCHG16B use these registers to hold values, so must
-be executed with the GC deferred or only on pinned/wired values.
+be executed with :EXTRA-REGISTERS metadata to indicate liveness.
 
 RSP is the stack pointer.
 RBP is the frame pointer, it is callee-save.
@@ -251,7 +251,8 @@ Specifies if an RBP-based stack frame is active.
 
 ** :INTERRUPT
 
-A boolean. When true other poorly defined rules apply.
+A boolean. Currently this does not mean anything.
+Must be false.
 
 
 ** :LAYOUT
@@ -281,6 +282,8 @@ When non-NIL, this means that the multiple-value calling convention is active
 and that there :RCX + N values live. If there are more than 5 values, then the
 GC will scan the thread's multiple value save area as required.
 
+This is ignored unless the function has been interrupted.
+
 ### The flexibility here is unnecessary. It only needs to be able to represent
     NIL, RCX+0 or RCX+1.
 
@@ -292,18 +295,19 @@ Defaults to NIL.
 
 An integer, (SIGNED-BYTE 32). There are N additional live values on the stack,
 from the current stack pointer value upwards.
+
 Defaults to 0.
+This is only valid when :FRAME is active.
 
 
 ** :PUSHED-VALUES-REGISTER
 
-A register (except :RSP) or NIL. It is ignored when NIL.
+This must be :RCX or NIL. It is ignored when NIL.
 The register it specifies contains a fixnum, the number of additional live
 values on the stack. This is additive with :PUSHED-VALUES.
 
-### Always seems to be :RCX or NIL, could be cut to just that.
-
 Defaults to NIL.
+This is only valid when :FRAME is active and the function is not in a call.
 
 
 ** :BLOCK-OR-TAGBODY-THUNK
@@ -313,3 +317,13 @@ When present, the stack & frame pointer are taken from the NLX information
 object in :RAX, and :RSP/:RBP are ignored.
 
 Defaults to NIL.
+
+
+** :EXTRA-REGISTERS
+
+Specifies that additional registers contain values.
+This may be either NIL (no extra registers), :RAX (only :RAX),
+:RAX-RCX (:RAX and :RCX), or :RAX-RCX-RDX (:RAX, :RCX and :RDX).
+
+Defaults to NIL.
+This is only valid when the function is not in a call.
