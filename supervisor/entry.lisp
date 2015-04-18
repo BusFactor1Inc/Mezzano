@@ -6,22 +6,6 @@
 ;;; FIXME: Should not be here.
 ;;; >>>>>>
 
-;; fixme: multiple-evaluation of PLACE.
-(defmacro push-wired-locked (item place mutex)
-  (let ((new-cons (gensym)))
-    `(let ((,new-cons (sys.int::cons-in-area ,item nil :wired)))
-       (with-mutex (,mutex)
-         (setf (cdr ,new-cons) ,place
-               place ,new-cons)))))
-
-;; fixme: multiple-evaluation of PLACE.
-(defmacro push-wired (item place)
-  `(setf ,place (sys.int::cons-in-area ,item ,place :wired)))
-
-(defun string-length (string)
-  (assert (sys.int::character-array-p string))
-  (sys.int::%array-like-ref-t string 3))
-
 (defun stack-base (stack)
   (car stack))
 
@@ -74,8 +58,6 @@
 (defconstant +boot-information-framebuffer-pitch+                 (+ +boot-information-video+ 16))
 (defconstant +boot-information-framebuffer-height+                (+ +boot-information-video+ 24))
 (defconstant +boot-information-framebuffer-layout+                (+ +boot-information-video+ 32))
-(defconstant +boot-information-module-base+                       808)
-(defconstant +boot-information-module-limit+                      816)
 (defconstant +boot-information-n-memory-map-entries+              824)
 (defconstant +boot-information-memory-map+                        832)
 
@@ -108,81 +90,11 @@
 
 (defun run-boot-hooks ()
   (dolist (hook *boot-hooks*)
-    (handler-case (funcall hook)
-      (error (c)
-        (format t "~&Error ~A while running boot hook ~S.~%" c hook)))))
-
-(defun align-up (value power-of-two)
-  "Align VALUE up to the nearest multiple of POWER-OF-TWO."
-  (logand (+ value (1- power-of-two)) (lognot (1- power-of-two))))
+    (sys.int::log-and-ignore-errors
+      (format t "Run boot hook ~A~%" hook)
+      (funcall hook))))
 
 (defvar *boot-id*)
-
-(defmacro do-boot-modules ((data-address data-size name-address name-size &optional result) &body body)
-  (let ((base-sym (gensym "base"))
-        (limit-sym (gensym "limit"))
-        (offset-sym (gensym "offset")))
-    `(do ((,base-sym (+ +physical-map-base+ (sys.int::memref-t (+ *boot-information-page* +boot-information-module-base+) 0)))
-          (,limit-sym (sys.int::memref-t (+ *boot-information-page* +boot-information-module-limit+) 0))
-          (,offset-sym 0))
-         ((>= ,offset-sym ,limit-sym)
-          ,result)
-       (let* ((,data-address (+ +physical-map-base+ (sys.int::memref-t (+ ,base-sym ,offset-sym) 0)))
-              (,data-size (sys.int::memref-t (+ ,base-sym ,offset-sym) 1))
-              (,name-address (+ ,base-sym ,offset-sym 24))
-              (,name-size (sys.int::memref-t (+ ,base-sym ,offset-sym) 2)))
-         (incf ,offset-sym (align-up (+ 24 ,name-size) 16))
-         (tagbody ,@body)))))
-
-;; This is pretty terrible, it's needed because the boot modules are transient
-;; and it's not safe to return references to transient memory.
-(defun fetch-boot-modules ()
-  (let ((boot-id *boot-id*)
-        (n-modules 0)
-        module-size-vector
-        name-size-vector
-        module-vector
-        name-vector)
-    ;; Count modules.
-    (with-pseudo-atomic
-      (when (not (eql boot-id *boot-id*))
-        (return-from fetch-boot-modules '()))
-      (do-boot-modules (data-address data-size name-address name-size)
-        (debug-print-line n-modules " " data-address " " data-size " " name-address " " name-size)
-        (incf n-modules)))
-    ;; Allocate vector to hold modules.
-    (setf module-size-vector (make-array n-modules)
-          module-vector (make-array n-modules)
-          name-size-vector (make-array n-modules)
-          name-vector (make-array n-modules))
-    ;; Fetch sizes.
-    (with-pseudo-atomic
-      (let ((n 0))
-        (when (not (eql boot-id *boot-id*))
-          (return-from fetch-boot-modules '()))
-        (do-boot-modules (data-address data-size name-address name-size)
-          (setf (aref module-size-vector n) data-size
-                (aref name-size-vector n) name-size)
-          (incf n))))
-    ;; Generate data and name vectors.
-    (dotimes (i n-modules)
-      (setf (aref module-vector i) (make-array (aref module-size-vector i) :element-type '(unsigned-byte 8))
-            (aref name-vector i) (make-array (aref name-size-vector i) :element-type 'character)))
-    ;; Copy modules & names out.
-    (with-pseudo-atomic
-      (let ((n 0))
-        (when (not (eql boot-id *boot-id*))
-          (return-from fetch-boot-modules '()))
-        (do-boot-modules (data-address data-size name-address name-size)
-          (let ((module (aref module-vector n))
-                (name (aref name-vector n)))
-            (dotimes (i data-size)
-              (setf (aref module i) (sys.int::memref-unsigned-byte-8 data-address i)))
-            (dotimes (i name-size)
-              (setf (aref name i) (code-char (sys.int::memref-unsigned-byte-8 name-address i)))))
-          (incf n))))
-    ;; Build & return module list.
-    (map 'list #'cons name-vector module-vector)))
 
 (defstruct (nic
              (:area :wired))

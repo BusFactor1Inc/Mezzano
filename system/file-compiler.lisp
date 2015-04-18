@@ -357,12 +357,26 @@ NOTE: Non-compound forms (after macro-expansion) are ignored."
               (>= (list-length form) 3)
               (eql (first form) 'define-lap-function)
               (listp (third form)))
-         ;; FORM looks like (DEFINE-LAP-FUNCTION name (options) code...)
-         (unless (= (list-length (third form)) 0)
-           (error "TODO: DEFINE-LAP-FUNCTION with options."))
-         (add-to-llf +llf-setf-fdefinition+
-                     (assemble-lap (cdddr form) (second form))
-                     (second form))
+         (destructuring-bind (name (&optional lambda-list frame-layout environment-vector-offset environment-vector-layout) &body code)
+             (cdr form)
+           (let ((docstring nil))
+             (when (stringp (first code))
+               (setf docstring (pop code)))
+             (add-to-llf +llf-setf-fdefinition+
+                         (assemble-lap
+                          code
+                          name
+                          (list :debug-info
+                                name
+                                frame-layout
+                                environment-vector-offset
+                                environment-vector-layout
+                                (when *compile-file-pathname*
+                                  (princ-to-string *compile-file-pathname*))
+                                sys.int::*top-level-form-number*
+                                lambda-list
+                                docstring))
+                         name)))
          t)
         ((and (listp form)
               (= (list-length form) 2)
@@ -415,12 +429,10 @@ NOTE: Non-compound forms (after macro-expansion) are ignored."
         ;; Now write everything to the fasl.
         ;; Do two passes to detect circularity.
         (let ((commands (reverse *llf-forms*)))
-          (gc) ; ### working around a hash-table bug
           (let ((*llf-dry-run* t))
             (dolist (cmd commands)
               (dolist (o (cdr cmd))
                 (save-object o omap (make-broadcast-stream)))))
-          (gc) ; ### working around a hash-table bug
           (let ((*llf-dry-run* nil))
             (dolist (cmd commands)
               (dolist (o (cdr cmd))
@@ -454,12 +466,10 @@ NOTE: Non-compound forms (after macro-expansion) are ignored."
       ;; Now write everything to the fasl.
       ;; Do two passes to detect circularity.
       (let ((commands (reverse *llf-forms*)))
-        (gc) ; ### working around a hash-table bug
         (let ((*llf-dry-run* t))
           (dolist (cmd commands)
             (dolist (o (cdr cmd))
               (save-object o omap (make-broadcast-stream)))))
-        (gc) ; ### working around a hash-table bug
         (let ((*llf-dry-run* nil))
           (dolist (cmd commands)
             (dolist (o (cdr cmd))
@@ -467,3 +477,17 @@ NOTE: Non-compound forms (after macro-expansion) are ignored."
             (write-byte (car cmd) output-stream))))
       (write-byte +llf-end-of-load+ output-stream))
     (values (truename output-stream) nil nil)))
+
+(defun assemble-lap (code &optional name debug-info wired)
+  (multiple-value-bind (mc constants fixups symbols gc-data)
+      (sys.lap-x86:assemble code
+        :base-address 16
+        :initial-symbols '((nil . :fixup)
+                           (t . :fixup)
+                           (:unbound-value . :fixup)
+                           (:unbound-tls-slot . :fixup)
+                           (:undefined-function . :fixup)
+                           (:closure-trampoline . :fixup))
+        :info (list name debug-info))
+    (declare (ignore symbols))
+    (make-function-with-fixups sys.int::+object-tag-function+ mc fixups constants gc-data wired)))

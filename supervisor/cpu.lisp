@@ -3,6 +3,9 @@
 
 (in-package :mezzano.supervisor)
 
+(defconstant +msr-ia32-fs-base+ #xC0000100)
+(defconstant +msr-ia32-gs-base+ #xC0000101)
+
 (defvar sys.int::*interrupt-service-routines*)
 
 (defvar sys.int::*bsp-wired-stack-base*)
@@ -100,9 +103,9 @@
     (dotimes (i 256)
       (multiple-value-bind (lo hi)
           (if (svref sys.int::*interrupt-service-routines* i)
-              (make-idt-entry :offset (sys.int::%array-like-ref-signed-byte-64
+              (make-idt-entry :offset (sys.int::%object-ref-signed-byte-64
                                        (svref sys.int::*interrupt-service-routines* i)
-                                       0)
+                                       sys.int::+function-entry-point+)
                               :ist (cond ((eql i 14) 1) ; page fault.
                                          ((>= i 32) 2) ; IRQ
                                          (t 0)))
@@ -138,7 +141,7 @@
     (setf (sys.int::memref-signed-byte-64 (+ addr +cpu-info-wired-stack-offset+) 0)
           (+ sys.int::*bsp-wired-stack-base* sys.int::*bsp-wired-stack-size*))
     ;; Shove the cpu info page into FS.
-    (setf (sys.int::msr sys.int::+msr-ia32-fs-base+) addr)
+    (setf (sys.int::msr +msr-ia32-fs-base+) addr)
     ;; Load various bits.
     (%lgdt (1- (* 4 8)) (+ addr +cpu-info-gdt-offset+))
     (%lidt (1- (* 256 16)) (+ addr +cpu-info-idt-offset+))

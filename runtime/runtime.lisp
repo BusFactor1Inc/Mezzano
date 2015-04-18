@@ -16,7 +16,9 @@
        (function
         (sys.int::%%disestablish-unwind-protect)))))
 
-(sys.int::define-lap-function values-list ()
+(sys.int::define-lap-function values-list ((list)
+                                           ((list 0)))
+  "Returns the elements of LIST as multiple values."
   (sys.lap-x86:push :rbp)
   (:gc :no-frame :layout #*0)
   (sys.lap-x86:mov64 :rbp :rsp)
@@ -129,7 +131,8 @@
   (sys.lap-x86:call (:r13 #.(+ (- sys.int::+tag-object+) 8 (* sys.int::+fref-entry-point+ 8))))
   (sys.lap-x86:ud2))
 
-(sys.int::define-lap-function sys.int::values-simple-vector ()
+(sys.int::define-lap-function sys.int::values-simple-vector ((simple-vector))
+  "Returns the elements of SIMPLE-VECTOR as multiple values."
   (sys.lap-x86:push :rbp)
   (:gc :no-frame :layout #*0)
   (sys.lap-x86:mov64 :rbp :rsp)
@@ -144,11 +147,11 @@
   (sys.lap-x86:jne type-error)
   (sys.lap-x86:mov64 :rax (:object :r8 -1))
   ;; Simple vector object tag is zero.
-  (sys.lap-x86:test8 :al #.(ash (1- (ash 1 sys.int::+array-type-size+))
-                                sys.int::+array-type-shift+))
+  (sys.lap-x86:test8 :al #.(ash (1- (ash 1 sys.int::+object-type-size+))
+                                sys.int::+object-type-shift+))
   (sys.lap-x86:jnz type-error)
   ;; Get number of values.
-  (sys.lap-x86:shr64 :rax #.sys.int::+array-length-shift+)
+  (sys.lap-x86:shr64 :rax #.sys.int::+object-data-shift+)
   (sys.lap-x86:jz zero-values)
   (sys.lap-x86:cmp64 :rax #.(+ (- mezzano.supervisor::+thread-mv-slots-end+ mezzano.supervisor::+thread-mv-slots-start+) 5))
   (sys.lap-x86:jae too-many-values)
@@ -229,15 +232,19 @@
   (mezzano.supervisor::safe-without-interrupts (symbol)
     (mezzano.supervisor::with-symbol-spinlock (*tls-lock*)
       ;; Make sure that another thread didn't allocate a slot while we were waiting for the lock.
-      (cond ((zerop (ldb (byte 16 10) (sys.int::%array-like-ref-unsigned-byte-64 symbol -1)))
+      (cond ((zerop (ldb (byte sys.int::+symbol-header-tls-size+ sys.int::+symbol-header-tls-position+)
+                         (sys.int::%object-header-data symbol)))
              (when (>= sys.int::*next-symbol-tls-slot* +maximum-tls-slot+)
                (error "Critial error! TLS slots exhausted!"))
              (let ((slot sys.int::*next-symbol-tls-slot*))
                (incf sys.int::*next-symbol-tls-slot*)
                ;; Twiddle TLS bits directly in the symbol header.
-               (setf (ldb (byte 16 10) (sys.int::%array-like-ref-unsigned-byte-64 symbol -1)) slot)
+               (setf (ldb (byte sys.int::+symbol-header-tls-size+ sys.int::+symbol-header-tls-position+)
+                          (sys.int::%object-header-data symbol))
+                     slot)
                slot))
-            (t (ldb (byte 16 10) (sys.int::%array-like-ref-unsigned-byte-64 symbol -1)))))))
+            (t (ldb (byte sys.int::+symbol-header-tls-size+ sys.int::+symbol-header-tls-position+)
+                    (sys.int::%object-header-data symbol)))))))
 
 (defvar *active-catch-handlers*)
 (defun sys.int::%catch (tag fn)
@@ -264,11 +271,11 @@
     (function object)
     (symbol
      ;; Fast-path for symbols.
-     (let ((fref (sys.int::symbol-fref object)))
+     (let ((fref (sys.int::%object-ref-t object sys.int::+symbol-function+)))
        (when (not fref)
          (return-from sys.int::%coerce-to-callable
            (fdefinition object)))
-       (let ((fn (sys.int::%array-like-ref-t fref sys.int::+fref-function+)))
+       (let ((fn (sys.int::%object-ref-t fref sys.int::+fref-function+)))
          (or fn
              (fdefinition object)))))))
 
@@ -334,7 +341,7 @@ thread's stack if this function is called from normal code."
   (loop
      with address = (logand return-address -16)
      ;; Be careful when reading to avoid bignums.
-     for potential-header-type = (ldb (byte +array-type-size+ +array-type-shift+)
+     for potential-header-type = (ldb (byte +object-type-size+ +object-type-shift+)
                                       (memref-unsigned-byte-8 address 0))
      do
        (when (and

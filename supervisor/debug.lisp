@@ -117,10 +117,13 @@
                                      (debug-write-string "#<unknown>")
                                      (return)))
                  (function (sys.int::return-address-to-function return-address))
-                 (info (sys.int::%array-like-ref-t function -1))
+                 (info (sys.int::%object-header-data function))
+                 (mc-size (ldb (byte sys.int::+function-machine-code-size+
+                                     sys.int::+function-machine-code-position+)
+                               info))
                  ;; First entry in the constant pool.
                  (address (logand (sys.int::lisp-object-address function) -16))
-                 (name (sys.int::memref-t address (* (ldb (byte 16 (- 16 sys.int::+n-fixnum-bits+)) info) 2))))
+                 (name (sys.int::memref-t address (* mc-size 2))))
             (debug-write name)))
         (debug-print-line)))))
 
@@ -186,10 +189,20 @@
   (panic "Assert error " datum " " arguments))
 
 (defun sys.int::raise-undefined-function (fref)
-  (let ((name (sys.int::%array-like-ref-t fref sys.int::+fref-name+)))
+  (let ((name (sys.int::%object-ref-t fref sys.int::+fref-name+)))
     (cond ((consp name)
            (panic "Undefined function (" (symbol-name (car name)) " " (symbol-name (car (cdr name))) ")"))
           (t (panic "Undefined function " (symbol-name name))))))
 
 (defun sys.int::raise-unbound-error (symbol)
   (panic "Unbound symbol " (symbol-name symbol)))
+
+(defun error (datum &rest arguments)
+  (declare (dynamic-extent arguments))
+  (panic "Early ERROR. " datum " " arguments))
+
+(defun enter-debugger (condition)
+  (panic "Early enter debugger. " condition))
+
+(defun invoke-debugger (condition)
+  (panic "Early invoke debugger. " condition))

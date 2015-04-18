@@ -32,7 +32,7 @@
 
 (defun debugger-show-variables (frame)
   (let* ((fn (function-from-frame frame))
-         (info (function-pool-object fn 1))
+         (info (function-debug-info fn))
          (var-id 0))
     (when (and (listp info) (eql (first info) :debug-info))
       (format t "Locals:~%")
@@ -51,7 +51,7 @@
 
 (defun debugger-read-variable (frame id)
   (let* ((fn (function-from-frame frame))
-         (info (function-pool-object fn 1))
+         (info (function-debug-info fn))
          (var-id 0))
     (when (and (listp info) (eql (first info) :debug-info))
       (dolist (var (third info))
@@ -73,7 +73,7 @@
 
 (defun debugger-write-variable (frame id value)
   (let* ((fn (function-from-frame frame))
-         (info (function-pool-object fn 1))
+         (info (function-debug-info fn))
          (var-id 0))
     (when (and (listp info) (eql (first info) :debug-info))
       (dolist (var (third info))
@@ -258,7 +258,9 @@
   (do ((i 0 (1+ i))
        (fp (read-frame-pointer)
            (memref-unsigned-byte-64 fp 0)))
-      ((= fp 0))
+      ;; Stop when return address or frame pointer is zero.
+      ((or (= fp 0)
+           (eql (memref-signed-byte-64 fp 1) 0)))
     (funcall fn i fp)))
 
 (defun backtrace (&optional limit)
@@ -266,18 +268,10 @@
    (lambda (i fp)
      (when (and limit (> i limit))
        (return-from backtrace))
-     (write-char #\Newline)
-     (write-integer fp 16)
-     (write-char #\Space)
-     (let ((return-address (memref-unsigned-byte-64 fp 1)))
-       (when (zerop return-address)
-         (return-from backtrace))
-       (let* ((fn (return-address-to-function return-address))
-              (name (when (functionp fn) (function-name fn))))
-         (write-integer (lisp-object-address fn) 16)
-         (when name
-           (write-char #\Space)
-           (write name)))))))
+     (let* ((return-address (memref-unsigned-byte-64 fp 1))
+            (fn (return-address-to-function return-address))
+            (name (when (functionp fn) (function-name fn))))
+       (format t "~&~X ~X ~S" fp return-address name)))))
 
 (defvar *traced-functions* '())
 (defvar *trace-depth* 0)

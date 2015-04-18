@@ -139,12 +139,30 @@
   (sys.lap-x86:mov32 :ecx #.(ash 1 sys.int::+n-fixnum-bits+))
   (sys.lap-x86:ret))
 
+(declaim (inline bignump
+                 %n-bignum-fragments
+                 %bignum-fragment
+                 (setf %bignum-fragment)))
+
+(defun bignump (object)
+  (%object-of-type-p object +object-tag-bignum+))
+
+(defun %n-bignum-fragments (bignum)
+  (%object-header-data bignum))
+
+;; Watch out - this can create another bignum to hold the fragment.
+(defun %bignum-fragment (bignum n)
+  (%object-ref-unsigned-byte-64 bignum n))
+
+(defun (setf %bignum-fragment) (value bignum n)
+  (setf (%object-ref-unsigned-byte-64 bignum n) value))
+
 (define-lap-function %%bignum-< ()
   ;; Read lengths.
   (sys.lap-x86:mov64 :rax (:r8 #.(- +tag-object+)))
   (sys.lap-x86:mov64 :rdx (:r9 #.(- +tag-object+)))
-  (sys.lap-x86:shr64 :rax #.+array-length-shift+)
-  (sys.lap-x86:shr64 :rdx #.+array-length-shift+)
+  (sys.lap-x86:shr64 :rax #.+object-data-shift+)
+  (sys.lap-x86:shr64 :rdx #.+object-data-shift+)
   ;; Pick the longest length.
   (sys.lap-x86:mov64 :rcx :rax)
   (sys.lap-x86:cmp64 :rax :rdx)
@@ -229,7 +247,7 @@
   (sys.lap-x86:cmp64 :rax (:r9 #.(- +tag-object+)))
   (sys.lap-x86:jne different)
   ;; Same length, compare words.
-  (sys.lap-x86:shr64 :rax #.+array-length-shift+)
+  (sys.lap-x86:shr64 :rax #.+object-data-shift+)
   (sys.lap-x86:xor32 :ecx :ecx)
   loop
   (sys.lap-x86:mov64 :rdx (:r8 #.(+ (- +tag-object+) 8) (:rcx 8)))
@@ -396,8 +414,8 @@ Implements the dumb mp_div algorithm from BigNum Math."
   ;; Read lengths.
   (sys.lap-x86:mov64 :rax (:r8 #.(- +tag-object+)))
   (sys.lap-x86:mov64 :rdx (:r9 #.(- +tag-object+)))
-  (sys.lap-x86:shr64 :rax #.+array-length-shift+)
-  (sys.lap-x86:shr64 :rdx #.+array-length-shift+)
+  (sys.lap-x86:shr64 :rax #.+object-data-shift+)
+  (sys.lap-x86:shr64 :rdx #.+object-data-shift+)
   ;; Allocate a new bignum large enough to hold the result.
   (sys.lap-x86:cmp32 :eax :edx)
   (sys.lap-x86:cmov32na :eax :edx)
@@ -416,8 +434,8 @@ Implements the dumb mp_div algorithm from BigNum Math."
   (:gc :frame)
   (sys.lap-x86:mov64 :rax (:r8 #.(- +tag-object+)))
   (sys.lap-x86:mov64 :rdx (:r9 #.(- +tag-object+)))
-  (sys.lap-x86:shr64 :rax #.+array-length-shift+)
-  (sys.lap-x86:shr64 :rdx #.+array-length-shift+)
+  (sys.lap-x86:shr64 :rax #.+object-data-shift+)
+  (sys.lap-x86:shr64 :rdx #.+object-data-shift+)
   ;; X in r8. Y in r9. Result in r10.
   ;; Pick the longest length.
   (sys.lap-x86:mov64 :rcx :rax)
@@ -531,8 +549,8 @@ Implements the dumb mp_div algorithm from BigNum Math."
   ;; Read lengths.
   (sys.lap-x86:mov64 :rax (:r8 #.(- +tag-object+)))
   (sys.lap-x86:mov64 :rdx (:r9 #.(- +tag-object+)))
-  (sys.lap-x86:shr64 :rax #.+array-length-shift+)
-  (sys.lap-x86:shr64 :rdx #.+array-length-shift+)
+  (sys.lap-x86:shr64 :rax #.+object-data-shift+)
+  (sys.lap-x86:shr64 :rdx #.+object-data-shift+)
   ;; Allocate a new bignum large enough to hold the result.
   (sys.lap-x86:cmp64 :rax :rdx)
   (sys.lap-x86:cmov64ng :rax :rdx)
@@ -701,29 +719,29 @@ Implements the dumb mp_div algorithm from BigNum Math."
 (defun %%bignum-multiply-unsigned (a b)
   (assert (bignump a))
   (assert (bignump b))
-  (let* ((digs (+ (%array-like-length a)
-                  (%array-like-length b)
+  (let* ((digs (+ (%n-bignum-fragments a)
+                  (%n-bignum-fragments b)
                   1))
          (c (%make-bignum-of-length digs)))
     (dotimes (i digs)
-      (setf (%array-like-ref-unsigned-byte-64 c i) 0))
-    (loop for ix from 0 below (%array-like-length a) do
+      (setf (%bignum-fragment c i) 0))
+    (loop for ix from 0 below (%n-bignum-fragments a) do
          (let ((u 0)
-               (pb (min (%array-like-length b)
+               (pb (min (%n-bignum-fragments b)
                         (- digs ix))))
            (when (< pb 1)
              (return))
            (loop for iy from 0 to (1- pb) do
-                (let ((r-hat (+ (%array-like-ref-unsigned-byte-64 c (+ iy ix))
+                (let ((r-hat (+ (%bignum-fragment c (+ iy ix))
                                 (%%bignum-multiply-step
-                                 (%array-like-ref-unsigned-byte-64 a ix)
-                                 (%array-like-ref-unsigned-byte-64 b iy))
+                                 (%bignum-fragment a ix)
+                                 (%bignum-fragment b iy))
                                 u)))
-                  (setf (%array-like-ref-unsigned-byte-64 c (+ iy ix))
+                  (setf (%bignum-fragment c (+ iy ix))
                         (ldb (byte 64 0) r-hat))
                   (setf u (ash r-hat -64))))
            (when (< (+ ix pb) digs)
-             (setf (%array-like-ref-unsigned-byte-64 c (+ ix pb)) u))))
+             (setf (%bignum-fragment c (+ ix pb)) u))))
     (%%canonicalize-bignum c)))
 
 (defun %%bignum-multiply-signed (a b)
@@ -796,8 +814,8 @@ Implements the dumb mp_div algorithm from BigNum Math."
                   ;; Read lengths.
                   (sys.lap-x86:mov64 :rax (:r8 #.(- +tag-object+)))
                   (sys.lap-x86:mov64 :rdx (:r9 #.(- +tag-object+)))
-                  (sys.lap-x86:shr64 :rax #.+array-length-shift+)
-                  (sys.lap-x86:shr64 :rdx #.+array-length-shift+)
+                  (sys.lap-x86:shr64 :rax #.+object-data-shift+)
+                  (sys.lap-x86:shr64 :rdx #.+object-data-shift+)
                   ;; Allocate a new bignum large enough to hold the result.
                   (sys.lap-x86:cmp32 :eax :edx)
                   (sys.lap-x86:cmov32na :eax :edx)
@@ -812,8 +830,8 @@ Implements the dumb mp_div algorithm from BigNum Math."
                   (:gc :frame)
                   (sys.lap-x86:mov64 :rax (:r8 #.(- +tag-object+)))
                   (sys.lap-x86:mov64 :rdx (:r9 #.(- +tag-object+)))
-                  (sys.lap-x86:shr64 :rax #.+array-length-shift+)
-                  (sys.lap-x86:shr64 :rdx #.+array-length-shift+)
+                  (sys.lap-x86:shr64 :rax #.+object-data-shift+)
+                  (sys.lap-x86:shr64 :rdx #.+object-data-shift+)
                   ;; X in r8. Y in r9. Result in r10.
                   ;; Pick the longest length.
                   (sys.lap-x86:mov64 :rcx :rax)
@@ -888,7 +906,7 @@ Implements the dumb mp_div algorithm from BigNum Math."
   (:gc :frame :layout #*11)
   ;; Allocate a new bignum large enough to hold the result.
   (sys.lap-x86:mov64 :rax (:r8 #.(- +tag-object+)))
-  (sys.lap-x86:shr64 :rax #.+array-length-shift+)
+  (sys.lap-x86:shr64 :rax #.+object-data-shift+)
   (sys.lap-x86:mov64 :rcx #.(ash 1 +n-fixnum-bits+)) ; fixnum 1
   (sys.lap-x86:lea64 :r8 ((:rax #.(ash 1 +n-fixnum-bits+))
                           #.(ash 1 +n-fixnum-bits+))) ; fixnumize +1
@@ -904,8 +922,8 @@ Implements the dumb mp_div algorithm from BigNum Math."
   (:gc :frame)
   (sys.lap-x86:mov64 :rbx (:r9 #.(- +tag-object+)))
   (sys.lap-x86:sar64 :rcx #.+n-fixnum-bits+)
-  (sys.lap-x86:and64 :rbx #.(lognot (1- (ash 1 +array-length-shift+))))
-  (sys.lap-x86:shr64 :rbx #.(- +array-length-shift+ +n-fixnum-bits+))
+  (sys.lap-x86:and64 :rbx #.(lognot (1- (ash 1 +object-data-shift+))))
+  (sys.lap-x86:shr64 :rbx #.(- +object-data-shift+ +n-fixnum-bits+))
   (sys.lap-x86:mov32 :r10d #.(ash 1 +n-fixnum-bits+))
   loop
   (sys.lap-x86:cmp64 :r10 :rbx)
@@ -942,7 +960,7 @@ Implements the dumb mp_div algorithm from BigNum Math."
   (:gc :frame :layout #*11)
   ;; Allocate a new bignum large enough to hold the result.
   (sys.lap-x86:mov64 :rax (:r8 #.(- +tag-object+)))
-  (sys.lap-x86:shr64 :rax #.+array-length-shift+)
+  (sys.lap-x86:shr64 :rax #.+object-data-shift+)
   (sys.lap-x86:mov64 :rcx #.(ash 1 +n-fixnum-bits+)) ; fixnum 1
   (sys.lap-x86:lea64 :r8 ((:rax #.(ash 1 +n-fixnum-bits+)))) ; fixnumize
   (sys.lap-x86:mov64 :r13 (:function %make-bignum-of-length))
@@ -957,8 +975,8 @@ Implements the dumb mp_div algorithm from BigNum Math."
   (:gc :frame)
   (sys.lap-x86:sar64 :rcx #.+n-fixnum-bits+)
   (sys.lap-x86:mov64 :rbx (:r9 #.(- +tag-object+)))
-  (sys.lap-x86:and64 :rbx #.(lognot (1- (ash 1 +array-length-shift+))))
-  (sys.lap-x86:shr64 :rbx #.(- +array-length-shift+ +n-fixnum-bits+))
+  (sys.lap-x86:and64 :rbx #.(lognot (1- (ash 1 +object-data-shift+))))
+  (sys.lap-x86:shr64 :rbx #.(- +object-data-shift+ +n-fixnum-bits+))
   (sys.lap-x86:mov32 :r10d #.(ash 1 +n-fixnum-bits+))
   loop
   (sys.lap-x86:cmp64 :r10 :rbx)
@@ -1046,7 +1064,7 @@ Implements the dumb mp_div algorithm from BigNum Math."
   (sys.lap-x86:mov64 :rbp :rsp)
   (:gc :frame)
   (sys.lap-x86:mov64 :rax (:r8 #.(- +tag-object+)))
-  (sys.lap-x86:shr64 :rax #.+array-length-shift+) ; RAX = number of fragments (raw).
+  (sys.lap-x86:shr64 :rax #.+object-data-shift+) ; RAX = number of fragments (raw).
   ;; Zero-size bignums are zero.
   (sys.lap-x86:jz return-zero)
   ;; Read the sign bit.
@@ -1074,7 +1092,7 @@ Implements the dumb mp_div algorithm from BigNum Math."
   maybe-resize-bignum
   ;; Test if the size actually changed.
   (sys.lap-x86:mov64 :rdx (:r8 #.(- +tag-object+)))
-  (sys.lap-x86:shr64 :rdx #.+array-length-shift+)
+  (sys.lap-x86:shr64 :rdx #.+object-data-shift+)
   (sys.lap-x86:cmp64 :rax :rdx)
   ;; If it didn't change, return the original bignum.
   ;; TODO: eventually the bignum code will pass in stack-allocated

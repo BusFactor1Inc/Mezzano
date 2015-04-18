@@ -90,47 +90,6 @@
 (defun print-object (object stream)
   (print-unreadable-object (object stream :type t :identity t)))
 
-;;; Early debug stuff.
-
-(defun low-level-backtrace (&optional limit (resolve-names t))
-  (do ((i 0 (1+ i))
-       (fp (read-frame-pointer)
-           (memref-unsigned-byte-64 fp 0)))
-      ((or (and limit (> i limit))
-           (= fp 0)))
-    (write-char #\Newline *cold-stream*)
-    (write-integer fp 16 *cold-stream*)
-    (write-char #\Space *cold-stream*)
-    (let* ((ret-addr (memref-unsigned-byte-64 fp 1))
-           (fn (when resolve-names
-                 (return-address-to-function ret-addr)))
-           (name (when (functionp fn) (function-name fn))))
-      (write-integer ret-addr 16 *cold-stream*)
-      (when (and resolve-names name)
-        (write-char #\Space *cold-stream*)
-        (write name :stream *cold-stream*)))))
-(setf (fdefinition 'backtrace) #'low-level-backtrace)
-
-(defun error (datum &rest arguments)
-  (write-char #\!)
-  (write datum)
-  (write-char #\Space)
-  (write arguments)
-  (low-level-backtrace)
-  (mezzano.supervisor:panic "Early ERROR"))
-
-(defun enter-debugger (condition)
-  (write-char #\!)
-  (write condition)
-  (low-level-backtrace)
-  (mezzano.supervisor:panic "Early ENTER-DEBUGGER"))
-
-(defun invoke-debugger (condition)
-  (write-char #\!)
-  (write condition)
-  (low-level-backtrace)
-  (mezzano.supervisor:panic "EARLY INVOKE-DEBUGGER"))
-
 ;;; Pathname stuff before pathnames exist (file.lisp defines real pathnames).
 
 (defun pathnamep (x) nil)
@@ -225,46 +184,12 @@
 (defun find-package-or-die (name)
   t)
 
-(defun load-additional-modules ()
-  (let ((modules (mezzano.supervisor:fetch-boot-modules)))
-    (when modules
-      (dolist (m modules)
-        (write-string "Loading ")
-        (write-line (car m))
-        (handler-case (mini-load-llf (mini-vector-stream (cdr m)))
-          (error (c)
-            (format t "~&Error ~A while loading boot module ~S.~%" c (car m))))))))
-
 (defun initialize-lisp ()
   "A grab-bag of things that must be done before Lisp will work properly.
 Cold-generator sets up just enough stuff for functions to be called, for
 structures to exist, and for memory to be allocated, but not much beyond that."
-  (setf *array-types* #(t
-                        fixnum
-                        bit
-                        (unsigned-byte 2)
-                        (unsigned-byte 4)
-                        (unsigned-byte 8)
-                        (unsigned-byte 16)
-                        (unsigned-byte 32)
-                        (unsigned-byte 64)
-                        (signed-byte 1)
-                        (signed-byte 2)
-                        (signed-byte 4)
-                        (signed-byte 8)
-                        (signed-byte 16)
-                        (signed-byte 32)
-                        (signed-byte 64)
-                        single-float
-                        double-float
-                        short-float
-                        long-float
-                        (complex single-float)
-                        (complex double-float)
-                        (complex short-float)
-                        (complex long-float)
-                        xmm-vector)
-        *package* nil
+  (cold-array-initialization)
+  (setf *package* nil
         *cold-stream* (make-cold-stream)
         *terminal-io* *cold-stream*
         *standard-output* *cold-stream*
@@ -298,7 +223,7 @@ structures to exist, and for memory to be allocated, but not much beyond that."
   ;; Hook FREFs up where required.
   (dotimes (i (length *initial-fref-obarray*))
     (let* ((fref (svref *initial-fref-obarray* i))
-           (name (%array-like-ref-t fref 0)))
+           (name (%object-ref-t fref +fref-name+)))
       (when (consp name)
         (setf (get (second name) 'setf-fref) fref))))
   ;; Run toplevel forms.
@@ -340,10 +265,8 @@ structures to exist, and for memory to be allocated, but not much beyond that."
   (dotimes (i (length *warm-llf-files*))
     (write-string "Loading ")
     (write-line (car (aref *warm-llf-files* i)))
-    (mini-load-llf (mini-vector-stream (cdr (aref *warm-llf-files* i)))))
+    (load-llf (mini-vector-stream (cdr (aref *warm-llf-files* i)))))
   (makunbound '*warm-llf-files*)
-  (mezzano.supervisor:add-boot-hook 'load-additional-modules)
-  (load-additional-modules)
   (mezzano.supervisor:snapshot)
   (write-line "Hello, world.")
   (terpri)

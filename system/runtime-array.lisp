@@ -3,54 +3,78 @@
 
 (in-package :sys.int)
 
-;;; (type tag size-in-bits 16-byte-aligned-p)
-(defvar *array-info*
-  '((bit #.+object-tag-array-bit+ 1 nil)
-    ((unsigned-byte 2) #.+object-tag-array-unsigned-byte-2+ 2 nil)
-    ((unsigned-byte 4) #.+object-tag-array-unsigned-byte-4+ 4 nil)
-    ((unsigned-byte 8) #.+object-tag-array-unsigned-byte-8+ 8 nil)
-    ((unsigned-byte 16) #.+object-tag-array-unsigned-byte-16+ 16 nil)
-    ((unsigned-byte 32) #.+object-tag-array-unsigned-byte-32+ 32 nil)
-    ((unsigned-byte 64) #.+object-tag-array-unsigned-byte-64+ 64 nil)
-    ((signed-byte 1) #.+object-tag-array-signed-byte-1+ 1 nil)
-    ((signed-byte 2) #.+object-tag-array-signed-byte-2+ 2 nil)
-    ((signed-byte 4) #.+object-tag-array-signed-byte-4+ 4 nil)
-    ((signed-byte 8) #.+object-tag-array-signed-byte-8+ 8 nil)
-    ((signed-byte 16) #.+object-tag-array-signed-byte-16+ 16 nil)
-    ((signed-byte 32) #.+object-tag-array-signed-byte-32+ 32 nil)
-    ((signed-byte 64) #.+object-tag-array-signed-byte-64+ 64 nil)
-    (single-float #.+object-tag-array-single-float+ 32 t)
-    (double-float #.+object-tag-array-double-float+ 64 t)
-    (long-float #.+object-tag-array-long-float+ 128 t)
-    (xmm-vector #.+object-tag-array-xmm-vector+ 128 t)
-    ((complex single-float) #.+object-tag-array-complex-single-float+ 64 t)
-    ((complex double-float) #.+object-tag-array-complex-double-float+ 128 t)
-    ((complex long-float) #.+object-tag-array-complex-long-float+ 256 t)
-    (fixnum #.+object-tag-array-fixnum+ 64 nil)
-    (t #.+object-tag-array-t+ 64 nil)))
+;; Information about the various specialized arrays.
+;; A list of (type tag size-in-bits 16-byte-aligned-p) lists.
+;; This must be sorted from most-specific type to least-specific type.
+(defvar *array-info*)
+;; A simple-vector mapping simple 1D array object tags to their element type.
+(defvar *array-types*)
 
-(defun %allocate-and-clear-array (length real-element-type &optional area)
+(defun cold-array-initialization ()
+  "Called during cold-load to initialize array support variables."
+  (setf *array-info*
+        '((bit                    #.+object-tag-array-bit+                    1 nil)
+          ((unsigned-byte 2)      #.+object-tag-array-unsigned-byte-2+        2 nil)
+          ((unsigned-byte 4)      #.+object-tag-array-unsigned-byte-4+        4 nil)
+          ((unsigned-byte 8)      #.+object-tag-array-unsigned-byte-8+        8 nil)
+          ((unsigned-byte 16)     #.+object-tag-array-unsigned-byte-16+      16 nil)
+          ((unsigned-byte 32)     #.+object-tag-array-unsigned-byte-32+      32 nil)
+          ((unsigned-byte 64)     #.+object-tag-array-unsigned-byte-64+      64 nil)
+          ((signed-byte 1)        #.+object-tag-array-signed-byte-1+          1 nil)
+          ((signed-byte 2)        #.+object-tag-array-signed-byte-2+          2 nil)
+          ((signed-byte 4)        #.+object-tag-array-signed-byte-4+          4 nil)
+          ((signed-byte 8)        #.+object-tag-array-signed-byte-8+          8 nil)
+          ((signed-byte 16)       #.+object-tag-array-signed-byte-16+        16 nil)
+          ((signed-byte 32)       #.+object-tag-array-signed-byte-32+        32 nil)
+          (fixnum                 #.+object-tag-array-fixnum+                64 nil)
+          ((signed-byte 64)       #.+object-tag-array-signed-byte-64+        64 nil)
+          (single-float           #.+object-tag-array-single-float+          32 t)
+          (double-float           #.+object-tag-array-double-float+          64 t)
+          (short-float            #.+object-tag-array-short-float+           16 t)
+          (long-float             #.+object-tag-array-long-float+           128 t)
+          (xmm-vector             #.+object-tag-array-xmm-vector+           128 t)
+          ((complex single-float) #.+object-tag-array-complex-single-float+  64 t)
+          ((complex double-float) #.+object-tag-array-complex-double-float+ 128 t)
+          ((complex short-float)  #.+object-tag-array-complex-short-float+   32 t)
+          ((complex long-float)   #.+object-tag-array-complex-long-float+   256 t)
+          (t                      #.+object-tag-array-t+                     64 nil)))
+  (setf *array-types*
+        #(t
+          fixnum
+          bit
+          (unsigned-byte 2)
+          (unsigned-byte 4)
+          (unsigned-byte 8)
+          (unsigned-byte 16)
+          (unsigned-byte 32)
+          (unsigned-byte 64)
+          (signed-byte 1)
+          (signed-byte 2)
+          (signed-byte 4)
+          (signed-byte 8)
+          (signed-byte 16)
+          (signed-byte 32)
+          (signed-byte 64)
+          single-float
+          double-float
+          short-float
+          long-float
+          (complex single-float)
+          (complex double-float)
+          (complex short-float)
+          (complex long-float)
+          xmm-vector)))
+
+(defun make-simple-array-1 (length real-element-type area)
   (let* ((info (assoc real-element-type *array-info* :test 'equal))
          (total-size (+ (if (fourth info) 64 0) ; padding for alignment.
                         (* length (third info)))))
     ;; Align on a word boundary.
     (unless (zerop (rem total-size 64))
       (incf total-size (- 64 (rem total-size 64))))
-    (%allocate-array-like (second info) (truncate total-size 64) length area)))
+    (%allocate-object (second info) (truncate total-size 64) length area)))
 
-(defun %allocate-and-fill-array (length real-element-type initial-element &optional area)
-  (let ((array (%allocate-and-clear-array length real-element-type area)))
-    (dotimes (i length)
-      (setf (aref array i) initial-element))
-    array))
-
-#+(or)(defun make-simple-vector (length &optional area)
-  "Allocate a SIMPLE-VECTOR with LENGTH elements.
-Equivalent to (make-array length). Used by the compiler to
-allocate environment frames."
-  (%allocate-array-like +object-tag-array-t+ length length area))
-
-(defun signify (value width)
+(defun sign-extend (value width)
   "Convert an unsigned integer to a signed value."
   (if (logbitp (1- width) value)
       (logior value (lognot (1- (ash 1 width))))
@@ -60,98 +84,98 @@ allocate environment frames."
   (ecase (%object-tag array)
     ((#.+object-tag-array-t+
       #.+object-tag-array-fixnum+)
-     (%array-like-ref-t array index))
+     (%object-ref-t array index))
     (#.+object-tag-array-bit+
      (multiple-value-bind (offset bit)
          (truncate index 8)
        (ldb (byte 1 bit)
-            (%array-like-ref-unsigned-byte-8 array offset))))
+            (%object-ref-unsigned-byte-8 array offset))))
     (#.+object-tag-array-unsigned-byte-2+
      (multiple-value-bind (offset bit)
          (truncate index 4)
        (ldb (byte 2 bit)
-            (%array-like-ref-unsigned-byte-8 array offset))))
+            (%object-ref-unsigned-byte-8 array offset))))
     (#.+object-tag-array-unsigned-byte-4+
      (multiple-value-bind (offset bit)
          (truncate index 2)
        (ldb (byte 4 bit)
-            (%array-like-ref-unsigned-byte-8 array offset))))
+            (%object-ref-unsigned-byte-8 array offset))))
     (#.+object-tag-array-unsigned-byte-8+
-     (%array-like-ref-unsigned-byte-8 array index))
+     (%object-ref-unsigned-byte-8 array index))
     (#.+object-tag-array-unsigned-byte-16+
-     (%array-like-ref-unsigned-byte-16 array index))
+     (%object-ref-unsigned-byte-16 array index))
     (#.+object-tag-array-unsigned-byte-32+
-     (%array-like-ref-unsigned-byte-32 array index))
+     (%object-ref-unsigned-byte-32 array index))
     (#.+object-tag-array-unsigned-byte-64+
-     (%array-like-ref-unsigned-byte-64 array index))
+     (%object-ref-unsigned-byte-64 array index))
     (#.+object-tag-array-signed-byte-1+
      (multiple-value-bind (offset bit)
          (truncate index 8)
-       (signify (ldb (byte 1 bit)
-                     (%array-like-ref-unsigned-byte-8 array offset))
-                1)))
+       (sign-extend (ldb (byte 1 bit)
+                         (%object-ref-unsigned-byte-8 array offset))
+                    1)))
     (#.+object-tag-array-signed-byte-2+
      (multiple-value-bind (offset bit)
          (truncate index 4)
-       (signify (ldb (byte 2 bit)
-                     (%array-like-ref-unsigned-byte-8 array offset))
-                2)))
+       (sign-extend (ldb (byte 2 bit)
+                         (%object-ref-unsigned-byte-8 array offset))
+                    2)))
     (#.+object-tag-array-signed-byte-4+
      (multiple-value-bind (offset bit)
          (truncate index 2)
-       (signify (ldb (byte 4 bit)
-                     (%array-like-ref-unsigned-byte-8 array offset))
-                4)))
+       (sign-extend (ldb (byte 4 bit)
+                         (%object-ref-unsigned-byte-8 array offset))
+                    4)))
     (#.+object-tag-array-signed-byte-8+
-     (%array-like-ref-signed-byte-8 array index))
+     (%object-ref-signed-byte-8 array index))
     (#.+object-tag-array-signed-byte-16+
-     (%array-like-ref-signed-byte-16 array index))
+     (%object-ref-signed-byte-16 array index))
     (#.+object-tag-array-signed-byte-32+
-     (%array-like-ref-signed-byte-32 array index))
+     (%object-ref-signed-byte-32 array index))
     (#.+object-tag-array-signed-byte-64+
-     (%array-like-ref-signed-byte-64 array index))
+     (%object-ref-signed-byte-64 array index))
     (#.+object-tag-array-single-float+
-     (%integer-as-single-float (%array-like-ref-unsigned-byte-32 array index)))))
+     (%integer-as-single-float (%object-ref-unsigned-byte-32 array index)))))
 
 (defun (setf %simple-array-aref) (value array index)
   (ecase (%object-tag array)
     (#.+object-tag-array-t+ ;; simple-vector
-     (setf (%array-like-ref-t array index) value))
+     (setf (%object-ref-t array index) value))
     (#.+object-tag-array-fixnum+
      (check-type value fixnum)
-     (setf (%array-like-ref-t array index) value))
+     (setf (%object-ref-t array index) value))
     (#.+object-tag-array-bit+
      (check-type value bit)
      (multiple-value-bind (offset bit)
          (truncate index 8)
        (setf (ldb (byte 1 bit)
-                  (%array-like-ref-unsigned-byte-8 array offset))
+                  (%object-ref-unsigned-byte-8 array offset))
              value)))
     (#.+object-tag-array-unsigned-byte-2+
      (check-type value (unsigned-byte 2))
      (multiple-value-bind (offset bit)
          (truncate index 4)
        (setf (ldb (byte 2 bit)
-                  (%array-like-ref-unsigned-byte-8 array offset))
+                  (%object-ref-unsigned-byte-8 array offset))
              value)))
     (#.+object-tag-array-unsigned-byte-4+
      (check-type value (unsigned-byte 4))
      (multiple-value-bind (offset bit)
          (truncate index 2)
        (setf (ldb (byte 4 bit)
-                  (%array-like-ref-unsigned-byte-8 array offset))
+                  (%object-ref-unsigned-byte-8 array offset))
              value)))
     (#.+object-tag-array-unsigned-byte-8+
-     (setf (%array-like-ref-unsigned-byte-8 array index)
+     (setf (%object-ref-unsigned-byte-8 array index)
            value))
     (#.+object-tag-array-unsigned-byte-16+
-     (setf (%array-like-ref-unsigned-byte-16 array index)
+     (setf (%object-ref-unsigned-byte-16 array index)
            value))
     (#.+object-tag-array-unsigned-byte-32+
-     (setf (%array-like-ref-unsigned-byte-32 array index)
+     (setf (%object-ref-unsigned-byte-32 array index)
            value))
     (#.+object-tag-array-unsigned-byte-64+
-     (setf (%array-like-ref-unsigned-byte-64 array index)
+     (setf (%object-ref-unsigned-byte-64 array index)
            value))
     (#.+object-tag-array-signed-byte-1+
      (check-type value (signed-byte 1))
@@ -159,7 +183,7 @@ allocate environment frames."
          (truncate index 8)
        (setf (ldb (byte 1 bit)
                   (ldb (byte 1 0)
-                       (%array-like-ref-unsigned-byte-8 array offset)))
+                       (%object-ref-unsigned-byte-8 array offset)))
              value)))
     (#.+object-tag-array-signed-byte-2+
      (check-type value (signed-byte 2))
@@ -167,7 +191,7 @@ allocate environment frames."
          (truncate index 4)
        (setf (ldb (byte 2 bit)
                   (ldb (byte 2 0)
-                       (%array-like-ref-unsigned-byte-8 array offset)))
+                       (%object-ref-unsigned-byte-8 array offset)))
              value)))
     (#.+object-tag-array-signed-byte-4+
      (check-type value (signed-byte 4))
@@ -175,78 +199,27 @@ allocate environment frames."
          (truncate index 2)
        (setf (ldb (byte 4 bit)
                   (ldb (byte 4 0)
-                       (%array-like-ref-unsigned-byte-8 array offset)))
+                       (%object-ref-unsigned-byte-8 array offset)))
              value)))
     (#.+object-tag-array-signed-byte-8+
-     (setf (%array-like-ref-signed-byte-8 array index)
+     (setf (%object-ref-signed-byte-8 array index)
            value))
     (#.+object-tag-array-signed-byte-16+
-     (setf (%array-like-ref-signed-byte-16 array index)
+     (setf (%object-ref-signed-byte-16 array index)
            value))
     (#.+object-tag-array-signed-byte-32+
-     (setf (%array-like-ref-signed-byte-32 array index)
+     (setf (%object-ref-signed-byte-32 array index)
            value))
     (#.+object-tag-array-signed-byte-64+
-     (setf (%array-like-ref-signed-byte-64 array index)
+     (setf (%object-ref-signed-byte-64 array index)
            value))
     (#.+object-tag-array-single-float+
      (check-type value single-float)
-     (setf (%array-like-ref-unsigned-byte-32 array index)
+     (setf (%object-ref-unsigned-byte-32 array index)
            (%single-float-as-integer value)))))
 
-(defun %memory-aref (type address index)
-  (cond
-    ((equal type '(unsigned-byte 8))
-     (memref-unsigned-byte-8 address index))
-    ((equal type '(unsigned-byte 16))
-     (memref-unsigned-byte-16 address index))
-    ((equal type '(unsigned-byte 32))
-     (memref-unsigned-byte-32 address index))
-    ((equal type '(unsigned-byte 64))
-     (memref-unsigned-byte-64 address index))
-    (t (error "TODO: %MEMORY-AREF ~S." type))))
-
-(defun (setf %memory-aref) (value type address index)
-  (cond
-    ((equal type '(unsigned-byte 8))
-     (setf (memref-unsigned-byte-8 address index) value))
-    ((equal type '(unsigned-byte 16))
-     (setf (memref-unsigned-byte-16 address index) value))
-    ((equal type '(unsigned-byte 32))
-     (setf (memref-unsigned-byte-32 address index) value))
-    ((equal type '(unsigned-byte 64))
-     (setf (memref-unsigned-byte-64 address index) value))
-    (t (error "TODO: SETF %MEMORY-AREF ~S." type))))
-
-(defparameter *array-types*
-  #(t
-    fixnum
-    bit
-    (unsigned-byte 2)
-    (unsigned-byte 4)
-    (unsigned-byte 8)
-    (unsigned-byte 16)
-    (unsigned-byte 32)
-    (unsigned-byte 64)
-    (signed-byte 1)
-    (signed-byte 2)
-    (signed-byte 4)
-    (signed-byte 8)
-    (signed-byte 16)
-    (signed-byte 32)
-    (signed-byte 64)
-    single-float
-    double-float
-    short-float
-    long-float
-    (complex single-float)
-    (complex double-float)
-    (complex short-float)
-    (complex long-float)
-    xmm-vector))
-
 (defun %simple-array-element-type (array)
-  (svref *array-types* (%simple-array-type array)))
+  (svref *array-types* (%object-tag array)))
 
 ;;; (destination source count)
 (define-lap-function %fast-copy ()
@@ -304,9 +277,11 @@ allocate environment frames."
     (let ((to-offset 0)
           (from-offset 0))
       (when (integerp (%complex-array-info to-array))
+        ;; Undisplace array.
         (setf to-offset (%complex-array-info to-array)
               to-array (%complex-array-storage to-array)))
       (when (integerp (%complex-array-info from-array))
+        ;; Undisplace array.
         (setf from-offset (%complex-array-info from-array)
               from-array (%complex-array-storage from-array)))
       (let* ((to-storage (%complex-array-storage to-array))
@@ -324,10 +299,10 @@ allocate environment frames."
              (from-stride (* from-width stride))
              (bytes-per-col (* ncols stride)))
         (assert (equal (array-element-type from-array) type))
-        (unless (integerp to-storage)
-          (setf to-storage (+ (lisp-object-address to-storage) (- +tag-object+) 8)))
-        (unless (integerp from-storage)
-          (setf from-storage (+ (lisp-object-address from-storage) (- +tag-object+) 8)))
+        ;; Objects to addresses.
+        (setf to-storage (+ (lisp-object-address to-storage) (- +tag-object+) 8))
+        (setf from-storage (+ (lisp-object-address from-storage) (- +tag-object+) 8))
+        ;; Offset into arrays.
         (incf to-storage (* (+ (* to-row to-width) to-col to-offset) stride))
         (incf from-storage (* (+ (* from-row from-width) from-col from-offset) stride))
         (%%bitblt to-storage from-storage bytes-per-col to-stride from-stride nrows)))))
@@ -387,14 +362,16 @@ allocate environment frames."
   (mezzano.supervisor:with-pseudo-atomic
     (let ((to-displacement 0))
       (when (integerp (%complex-array-info to-array))
+        ;; Undisplace array.
         (setf to-displacement (%complex-array-info to-array)
               to-array (%complex-array-storage to-array)))
       (let* ((to-storage (%complex-array-storage to-array))
              (to-width (array-dimension to-array 1))
              (to-offset (+ (* to-row to-width) to-col))
              (type (array-element-type to-array)))
-        (unless (fixnump to-storage)
-          (setf to-storage (+ (lisp-object-address to-storage) (- +tag-object+) 8)))
+        ;; Object to address.
+        (setf to-storage (+ (lisp-object-address to-storage) (- +tag-object+) 8))
+        ;; Offset into array.
         (incf to-storage (* to-displacement 4))
         (cond
           ((equal type '(unsigned-byte 8))

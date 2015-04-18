@@ -5,12 +5,15 @@
 
 (defconstant +n-fixnum-bits+ 1)
 (defconstant +fixnum-tag-mask+ (1- (ash 1 +n-fixnum-bits+)))
-(defconstant +array-type-shift+ 2)
-(defconstant +array-type-size+ 6)
-(defconstant +array-length-shift+ 8)
-(defconstant +array-length-size+ 56)
-(defconstant +array-like-mark-bit+ #b10)
 
+;;; Fields in the object header.
+(defconstant +object-type-shift+ 2)
+(defconstant +object-type-size+ 6)
+(defconstant +object-data-shift+ 8)
+(defconstant +object-data-size+ 56)
+(defconstant +pinned-object-mark-bit+ #b10)
+
+;;; Low 4 bits of a value are tag bits:
 (defconstant +tag-fixnum-000+     #b0000)
 (defconstant +tag-dx-root-object+ #b0001)
 (defconstant +tag-fixnum-001+     #b0010)
@@ -59,8 +62,7 @@
 (defconstant +last-simple-1d-array-object-tag+ +object-tag-array-xmm-vector+)
 ;;#b011001
 ;;#b011010
-;; Arrays that point to somewhere special in memory (for MMIO, etc).
-(defconstant +object-tag-memory-array+            #b011011)
+;;#b011011
 ;; Strings. Simple strings are the same as normal strings, except marked as simple.
 ;; These are actually character arrays, they're only string when rank = 1.
 (defconstant +object-tag-simple-string+           #b011100)
@@ -68,7 +70,7 @@
 ;; Other arrays.
 (defconstant +object-tag-simple-array+            #b011110)
 (defconstant +object-tag-array+                   #b011111)
-(defconstant +first-complex-array-object-tag+ +object-tag-memory-array+)
+(defconstant +first-complex-array-object-tag+ +object-tag-simple-string+)
 (defconstant +last-complex-array-object-tag+ +object-tag-array+)
 
 ;; When set, the array or string is not simple.
@@ -121,15 +123,74 @@
 (defconstant +last-function-object-tag+ +object-tag-funcallable-instance+)
 ;;#b111111
 
+;;; Layout of symbols.
+(defconstant +symbol-name+ 0)
+(defconstant +symbol-package+ 1)
+(defconstant +symbol-value+ 2)
+(defconstant +symbol-function+ 3)
+(defconstant +symbol-plist+ 4)
+
+(defconstant +symbol-header-tls-size+ 16)
+(defconstant +symbol-header-tls-position+ 2)
+
+(defconstant +symbol-header-mode-size+ 2)
+(defconstant +symbol-header-mode-position+ 0)
+
 (defconstant +symbol-mode-nil+ 0)
 (defconstant +symbol-mode-special+ 1)
 (defconstant +symbol-mode-constant+ 2)
 (defconstant +symbol-mode-symbol-macro+ 3)
 
+;;; Layout of a function's header.
+;;; Currently applies to all 3 function types.
+
+;; Machine code size is measured in paragraphs (16 byte units) and starts
+;; at the beginning of the object, including the header.
+(defconstant +function-machine-code-size+ 16)
+(defconstant +function-machine-code-position+ 8)
+;; Number of entries in the constant pool.
+(defconstant +function-constant-pool-size+ 16)
+(defconstant +function-constant-pool-position+ 24)
+;; Size of the GC metadata in bytes.
+(defconstant +function-gc-metadata-size+ 16)
+(defconstant +function-gc-metadata-position+ 40)
+
+;;; Layout of functions.
+;;; Common to all functions.
+
+;; Entry point of the function, used by function call machinery.
+(defconstant +function-entry-point+ 0)
+
+;;; Closures.
+;;; Only the position of the function is specified. The compiler may arrange
+;;; closure environments however it wants, including inlining them into the
+;;; closure object.
+(defconstant +closure-function+ 1)
+
+;;; Funcallable instances.
+;; Funcallable instances store the entry point of their function to avoid an
+;; additional indirection when invoked. This is seperate from the function
+;; entry point slot.
+;; Layout is important. Update (setf funcallable-std-instance-function) if
+;; it changes.
+(defconstant +funcallable-instance-entry-point+ 3)
+(defconstant +funcallable-instance-function+ 4)
+(defconstant +funcallable-instance-class+ 5)
+(defconstant +funcallable-instance-slots+ 6)
+
+;;; Layout of function-references.
+
 (defconstant +fref-name+ 0)
-;; Layout of this to slots is important, update (SETF FUNCTION-REFERENCE-FUNCTION) if it changes.
+;; Layout of these two slots is important, update (SETF FUNCTION-REFERENCE-FUNCTION) if it changes.
 (defconstant +fref-function+ 1)
 (defconstant +fref-entry-point+ 2)
+
+;;; Layout of complex arrays.
+
+(defconstant +complex-array-storage+ 0)
+(defconstant +complex-array-fill-pointer+ 1)
+(defconstant +complex-array-info+ 2)
+(defconstant +complex-array-axis-0+ 3)
 
 ;; Some bits are stored in the high(ish) bits of the address.
 ;; These are used to support the GC.
@@ -137,7 +198,7 @@
 (defconstant +address-tag-shift+ 45)
 (defconstant +address-tag-size+ 3)
 
-(defconstant +address-mark-bit+ 44)
+(defconstant +address-newspace/oldspace-bit+ 44)
 
 ;; Pinned must be zero, a number of critical objects are pinned & wired and stored
 ;; below 2GB to permit fast access to them.
@@ -153,7 +214,7 @@
 (defconstant +block-map-id-shift+ 8)
 (defconstant +block-map-id-size+ 56)
 
-(defparameter *llf-version* 4)
+(defparameter *llf-version* 5)
 
 (defconstant +llf-end-of-load+ #xFF)
 (defconstant +llf-backlink+ #x01)

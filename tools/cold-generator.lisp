@@ -27,10 +27,14 @@
     "supervisor/virtio.lisp"
     "supervisor/virtio-net.lisp"
     "supervisor/profiler.lisp"
+    "supervisor/support.lisp"
     "runtime/runtime.lisp"
     "runtime/allocate.lisp"
     "runtime/numbers.lisp"
-    "runtime/string.lisp"))
+    "runtime/string.lisp"
+    "runtime/array.lisp"
+    "runtime/struct.lisp"
+    "runtime/symbol.lisp"))
 
 (defparameter *source-files*
   '("system/cold-start.lisp"
@@ -48,6 +52,8 @@
     "system/hash-table.lisp"
     "system/runtime-numbers.lisp"
     "system/numbers.lisp"
+    "system/data-types.lisp"
+    "system/gc.lisp"
     "system/reader.lisp"
     "system/character.lisp"
     "system/backquote.lisp"
@@ -55,10 +61,8 @@
     "system/cons-compiler-macros.lisp"
     "system/defmacro.lisp"
     "system/basic-macros.lisp"
-    "system/data-types.lisp"
     "system/parse.lisp"
     "system/describe.lisp"
-    "system/gc.lisp"
     "system/load.lisp"
     "system/time.lisp"
     "system/profiler.lisp"
@@ -80,7 +84,8 @@
     "system/eval.lisp"
     "system/stream.lisp"
     "system/ansi-loop.lisp"
-    "misc.lisp"
+    "system/environment.lisp"
+    "system/pprint.lisp"
     "compiler/package.lisp"
     "lap.lisp"
     "lap-x86.lisp"
@@ -92,7 +97,16 @@
     "compiler/inline.lisp"
     "compiler/kill-temps.lisp"
     "compiler/codegen.lisp"
-    "compiler/builtins.lisp"
+    "compiler/builtins/builtins.lisp"
+    "compiler/builtins/array.lisp"
+    "compiler/builtins/character.lisp"
+    "compiler/builtins/cons.lisp"
+    "compiler/builtins/memory.lisp"
+    "compiler/builtins/misc.lisp"
+    "compiler/builtins/numbers.lisp"
+    "compiler/builtins/objects.lisp"
+    "compiler/builtins/symbols.lisp"
+    "compiler/builtins/unwind.lisp"
     "compiler/branch-tension.lisp"
     "compiler/lower-environment.lisp"
     "compiler/lower-special-bindings.lisp"
@@ -103,7 +117,15 @@
     "gui/input-drivers.lisp"
     "system/unifont.lisp"
     "gui/basic-repl.lisp"
+    "net/package.lisp"
+    "net/network.lisp"
     "net/ethernet.lisp"
+    "net/arp.lisp"
+    "net/ip.lisp"
+    "net/udp.lisp"
+    "net/tcp.lisp"
+    "net/dns.lisp"
+    "net/network-setup.lisp"
     "file/fs.lisp"
     "file/remote.lisp"
     "ipl.lisp"))
@@ -284,7 +306,7 @@
       (area-for-address address)
     (ub64ref/le data-vector (* offset 8))))
 
-(defun compile-lap-function (code &key (area *default-pinned-allocation-area*) extra-symbols constant-values (position-independent t))
+(defun compile-lap-function (code &key (area *default-pinned-allocation-area*) extra-symbols constant-values (position-independent t) (name 'sys.int::support-function))
   "Compile a list of LAP code as a function. Constants must only be symbols."
   (let ((base-address (if position-independent
                           0
@@ -295,7 +317,9 @@
             :base-address base-address
             :initial-symbols (list* '(nil . :fixup)
                                     '(t . :fixup)
-                                    extra-symbols)))
+                                    extra-symbols)
+            ;; Name & debug info.
+            :info (list name nil)))
       (declare (ignore symbols))
       (setf mc (adjust-array mc (* (ceiling (length mc) 16) 16) :fill-pointer t))
       (let ((total-size (+ (* (truncate (length mc) 16) 2)
@@ -309,7 +333,7 @@
           ;; Set header word.
           (setf (word address) 0)
           (setf (ldb (byte 16 0) (word address)) (ash sys.int::+object-tag-function+
-                                                      sys.int::+array-type-shift+) ; tag
+                                                      sys.int::+object-type-shift+) ; tag
                 (ldb (byte 16 16) (word address)) (truncate (length mc) 16)
                 (ldb (byte 16 32) (word address)) (length constants)
                 (ldb (byte 16 48) (word address)) (length gc-info))
@@ -412,8 +436,8 @@
         (cl-keyword (allocate 6 :wired))
         (unbound-val (allocate 2 :wired))
         (unbound-tls-val (allocate 2 :wired))
-        (undef-fn (compile-lap-function *undefined-function-thunk* :area :wired))
-        (closure-tramp (compile-lap-function *closure-trampoline* :area :wired))
+        (undef-fn (compile-lap-function *undefined-function-thunk* :area :wired :name 'sys.int::%%undefined-function-trampoline))
+        (closure-tramp (compile-lap-function *closure-trampoline* :area :wired :name 'sys.int::%%closure-trampoline))
         (struct-def-def (allocate 7 :wired)))
     (format t "NIL at word ~X~%" nil-value)
     (format t "  T at word ~X~%" t-value)
@@ -639,7 +663,7 @@
       (add-region-to-block-map bml4
                                (/ (+ *general-area-store* (align-up *general-area-bump* #x200000)) #x1000)
                                (logior (ash sys.int::+address-tag-general+ sys.int::+address-tag-shift+)
-                                       (ash 1 sys.int::+address-mark-bit+))
+                                       (ash 1 sys.int::+address-newspace/oldspace-bit+))
                                (/ (align-up *general-area-bump* #x200000) #x1000)
                                (logior sys.int::+block-map-zero-fill+))
       (add-region-to-block-map bml4
@@ -651,7 +675,7 @@
       (add-region-to-block-map bml4
                                (/ (+ *cons-area-store* (align-up *cons-area-bump* #x200000)) #x1000)
                                (logior (ash sys.int::+address-tag-cons+ sys.int::+address-tag-shift+)
-                                       (ash 1 sys.int::+address-mark-bit+))
+                                       (ash 1 sys.int::+address-newspace/oldspace-bit+))
                                (/ (align-up *cons-area-bump* #x200000) #x1000)
                                (logior sys.int::+block-map-zero-fill+))
       (dolist (stack *stack-list*)
@@ -674,8 +698,8 @@
   (values))
 
 (defun array-header (tag length)
-  (logior (ash tag sys.int::+array-type-shift+)
-          (ash length sys.int::+array-length-shift+)))
+  (logior (ash tag sys.int::+object-type-shift+)
+          (ash length sys.int::+object-data-shift+)))
 
 (defun pack-halfwords (low high)
   (check-type low (unsigned-byte 32))
@@ -748,7 +772,7 @@
   (setf (word (+ (symbol-address (symbol-name symbol)
                                  (canonical-symbol-package symbol))
                  1
-                 sys.c::+symbol-value+))
+                 sys.int::+symbol-value+))
         value))
 
 (defun generate-toplevel-form-array (functions symbol)
@@ -995,7 +1019,7 @@
     ;; Realign the stack.
     (sys.lap-x86:and64 :rsp ,(lognot 15))
     (sys.lap-x86:sub64 :rsp 16) ; 2 elements.
-    (sys.lap-x86:mov64 (:rsp) ,(ash sys.int::+object-tag-interrupt-frame+ sys.int::+array-type-shift+)) ; header
+    (sys.lap-x86:mov64 (:rsp) ,(ash sys.int::+object-tag-interrupt-frame+ sys.int::+object-type-shift+)) ; header
     (sys.lap-x86:lea64 :rax (:rbp :rbp)) ; Convert frame pointer to fixnum.
     (sys.lap-x86:mov64 (:rsp 8) :rax) ; 2nd element.
     (sys.lap-x86:lea64 :r8 (:rsp ,sys.int::+tag-object+))
@@ -1121,11 +1145,13 @@
                                    collect (create-user-interrupt-isr i)))
            (common-code (compile-lap-function *common-interrupt-code*
                                               :area :wired
-                                              :position-independent nil))
+                                              :position-independent nil
+                                              :name 'sys.int::%%common-isr-thunk))
            (common-user-code (compile-lap-function *common-user-interrupt-code*
                                                    :area :wired
                                                    :position-independent nil
-                                                   :extra-symbols (list (cons 'interrupt-common (+ (* common-code 8) 16))))))
+                                                   :extra-symbols (list (cons 'interrupt-common (+ (* common-code 8) 16)))
+                                                   :name 'sys.int::%%common-user-isr-thunk)))
       (let ((fref (function-reference 'sys.int::%%common-isr-thunk)))
         (setf (word (+ fref 1 sys.int::+fref-function+)) (make-value common-code sys.int::+tag-object+)
               (word (+ fref 1 sys.int::+fref-entry-point+)) (+ (* common-code 8) 16)))
@@ -1141,7 +1167,8 @@
                                              :area :wired
                                              :position-independent nil
                                              :extra-symbols (list (cons 'interrupt-common (+ (* common-code 8) 16))
-                                                                  (cons 'user-interrupt-common (+ (* common-user-code 8) 16))))))
+                                                                  (cons 'user-interrupt-common (+ (* common-user-code 8) 16)))
+                                             :name (intern (format nil "%%ISR-THUNK-~D" i) "SYS.INT"))))
              (setf (word (+ isr-table 1 i)) (make-value addr sys.int::+tag-object+)))
          else do
            (setf (word (+ isr-table 1 i)) (make-value (symbol-address "NIL" "COMMON-LISP") sys.int::+tag-object+))))))
@@ -1153,19 +1180,19 @@
   (let ((wired-free-area (allocate (* 2048 1024) :wired))
         (pinned-free-area (allocate (* 1024 1024) :pinned)))
     (setf *wired-area-bump* (align-up *wired-area-bump* #x200000))
-    (setf (word wired-free-area) (logior (ash sys.int::+object-tag-freelist-entry+ sys.int::+array-type-shift+)
+    (setf (word wired-free-area) (logior (ash sys.int::+object-tag-freelist-entry+ sys.int::+object-type-shift+)
                                          (ash (truncate (- *wired-area-bump*
                                                            (ldb (byte 44 0) (* wired-free-area 8)))
                                                         8)
-                                              sys.int::+array-length-shift+))
+                                              sys.int::+object-data-shift+))
           (word (1+ wired-free-area)) (make-value (symbol-address "NIL" "COMMON-LISP") sys.int::+tag-object+))
     (setf (cold-symbol-value 'sys.int::*wired-area-freelist*) (make-fixnum (* wired-free-area 8)))
     (setf *pinned-area-bump* (align-up *pinned-area-bump* #x200000))
-    (setf (word pinned-free-area) (logior (ash sys.int::+object-tag-freelist-entry+ sys.int::+array-type-shift+)
+    (setf (word pinned-free-area) (logior (ash sys.int::+object-tag-freelist-entry+ sys.int::+object-type-shift+)
                                           (ash (truncate (- *pinned-area-bump*
                                                             (ldb (byte 44 0) (* pinned-free-area 8)))
                                                          8)
-                                               sys.int::+array-length-shift+))
+                                               sys.int::+object-data-shift+))
           (word (1+ pinned-free-area)) (make-value (symbol-address "NIL" "COMMON-LISP") sys.int::+tag-object+))
     (setf (cold-symbol-value 'sys.int::*pinned-area-freelist*) (make-fixnum (* pinned-free-area 8)))
     (setf *wired-area-bump* (align-up *wired-area-bump* #x200000))
@@ -1297,6 +1324,12 @@
             sys.int::*stack-area-bump*
             :wired :pinned :general :cons :nursery :stack
             ))
+    (loop
+       for (what address byte-offset type debug-info) in *pending-fixups*
+       when (and (consp what)
+                 (symbolp (second what)))
+       do (symbol-address (string (second what))
+                          (package-name (symbol-package (second what)))))
     (setf (cold-symbol-value 'sys.int::*bsp-idle-thread*)
           (create-thread "BSP idle thread"
                          :stack-size (* 16 1024)))
@@ -1487,8 +1520,8 @@
              (extract-object (word (1+ address)))))
       (#.sys.int::+tag-object+
        (let* ((header (word address))
-              (tag (ldb (byte sys.int::+array-type-size+
-                              sys.int::+array-type-shift+)
+              (tag (ldb (byte sys.int::+object-type-size+
+                              sys.int::+object-type-shift+)
                         header)))
          (ecase tag
            (#.sys.int::+object-tag-symbol+
@@ -1583,7 +1616,7 @@
     (setf (word address) 0)
     (setf (word (1+ address)) (* (+ address 2) 8))
     (lock-word (1+ address))
-    (setf (ldb (byte  8 0) (word address)) (ash tag sys.int::+array-type-shift+)
+    (setf (ldb (byte  8 0) (word address)) (ash tag sys.int::+object-type-shift+)
           (ldb (byte 16 16) (word address)) (ceiling (+ mc-length 16) 16)
           (ldb (byte 16 32) (word address)) n-constants
           (ldb (byte 16 48) (word address)) gc-info-length)
