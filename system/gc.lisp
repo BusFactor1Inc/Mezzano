@@ -25,6 +25,83 @@
 
 (defvar *gc-epoch* 0)
 
+(defparameter *object-tags-to-basic-types*
+  #(array-t                    ; #b000000
+    array-fixnum               ; #b000001
+    array-bit                  ; #b000010
+    array-unsigned-byte-2      ; #b000011
+    array-unsigned-byte-4      ; #b000100
+    array-unsigned-byte-8      ; #b000101
+    array-unsigned-byte-16     ; #b000110
+    array-unsigned-byte-32     ; #b000111
+    array-unsigned-byte-64     ; #b001000
+    array-signed-byte-1        ; #b001001
+    array-signed-byte-2        ; #b001010
+    array-signed-byte-4        ; #b001011
+    array-signed-byte-8        ; #b001100
+    array-signed-byte-16       ; #b001101
+    array-signed-byte-32       ; #b001110
+    array-signed-byte-64       ; #b001111
+    array-single-float         ; #b010000
+    array-double-float         ; #b010001
+    array-short-float          ; #b010010
+    array-long-float           ; #b010011
+    array-complex-single-float ; #b010100
+    array-complex-double-float ; #b010101
+    array-complex-short-float  ; #b010110
+    array-complex-long-float   ; #b010111
+    array-xmm-vector           ; #b011000
+    invalid-011001             ; #b011001
+    invalid-011010             ; #b011010
+    invalid-011011             ; #b011011
+    simple-string              ; #b011100
+    string                     ; #b011101
+    simple-array               ; #b011110
+    array                      ; #b011111
+    bignum                     ; #b100000
+    double-float               ; #b100001
+    short-float                ; #b100010
+    long-float                 ; #b100011
+    complex-rational           ; #b100100
+    complex-single-float       ; #b100101
+    complex-double-float       ; #b100110
+    complex-short-float        ; #b100111
+    complex-long-float         ; #b101000
+    ratio                      ; #b101001
+    invalid-101010             ; #b101010
+    invalid-101011             ; #b101011
+    invalid-101100             ; #b101100
+    invalid-101101             ; #b101101
+    invalid-101110             ; #b101110
+    invalid-101111             ; #b101111
+    symbol                     ; #b110000
+    structure-object           ; #b110001
+    std-instance               ; #b110010
+    xmm-vector                 ; #b110011
+    thread                     ; #b110100
+    unbound-value              ; #b110101
+    function-reference         ; #b110110
+    interrupt-frame            ; #b110111
+    cons                       ; #b111000
+    freelist-entry             ; #b111001
+    invalid-111010             ; #b111010
+    invalid-111011             ; #b111011
+    function                   ; #b111100
+    closure                    ; #b111101
+    funcallable-instance       ; #b111110
+    invalid-111111             ; #b111111
+    )
+  "Mapping from object tags to more friendly names.
+Should be kept in sync with data-types.")
+
+(defun print-n-allocated-objects-table (n-allocated-objects allocated-object-sizes)
+  (dotimes (i (length n-allocated-objects))
+    (when (not (zerop (aref n-allocated-objects i)))
+      (format t "  ~A:~35T~:D objects. ~:D words.~%"
+              (aref *object-tags-to-basic-types* i)
+              (aref n-allocated-objects i)
+              (aref allocated-object-sizes i)))))
+
 (defun room (&optional (verbosity :default))
   (let ((total-used 0)
         (total 0))
@@ -33,27 +110,35 @@
             (truncate (* *general-area-bump* 100) *general-area-limit*))
     (incf total-used (truncate *general-area-bump* 8))
     (incf total (truncate *general-area-limit* 8))
+    (when (eql verbosity t)
+      (multiple-value-bind (n-allocated-objects allocated-object-sizes)
+          (general-area-info)
+        (print-n-allocated-objects-table n-allocated-objects allocated-object-sizes)))
     (format t "Cons area: ~:D/~:D words used (~D%).~%"
             (truncate *cons-area-bump* 8) (truncate *cons-area-limit* 8)
             (truncate (* *cons-area-bump* 100) *cons-area-limit*))
     (incf total-used (truncate *cons-area-bump* 8))
     (incf total (truncate *cons-area-limit* 8))
-    (multiple-value-bind (allocated-words total-words largest-free-space)
+    (multiple-value-bind (allocated-words total-words largest-free-space n-allocated-objects allocated-object-sizes)
         (pinned-area-info (* 2 1024 1024) *wired-area-bump*)
       (format t "Wired area: ~:D/~:D words allocated (~D%).~%"
               allocated-words total-words
               (truncate (* allocated-words 100) total-words))
       (format t "  Largest free area: ~:D words.~%" largest-free-space)
       (incf total-used allocated-words)
-      (incf total total-words))
-    (multiple-value-bind (allocated-words total-words largest-free-space)
+      (incf total total-words)
+      (when (eql verbosity t)
+        (print-n-allocated-objects-table n-allocated-objects allocated-object-sizes)))
+    (multiple-value-bind (allocated-words total-words largest-free-space n-allocated-objects allocated-object-sizes)
         (pinned-area-info (* 2 1024 1024 1024) *pinned-area-bump*)
       (format t "Pinned area: ~:D/~:D words allocated (~D%).~%"
               allocated-words total-words
               (truncate (* allocated-words 100) total-words))
       (format t "  Largest free area: ~:D words.~%" largest-free-space)
       (incf total-used allocated-words)
-      (incf total total-words))
+      (incf total total-words)
+      (when (eql verbosity t)
+        (print-n-allocated-objects-table n-allocated-objects allocated-object-sizes)))
     (format t "Total ~:D/~:D words used (~D%).~%"
             total-used total
             (truncate (* total-used 100) total))
@@ -71,27 +156,56 @@
     (format t "~:D words to next GC.~%" (truncate *memory-expansion-remaining* 8)))
   (values))
 
+(defun general-area-info ()
+  (let ((n-allocated-objects (make-array (ash 1 +object-type-size+)
+                                         :initial-element 0))
+        (allocated-objects-sizes (make-array (ash 1 +object-type-size+)
+                                             :initial-element 0))
+        (finger 0))
+    (mezzano.supervisor:with-world-stopped ()
+      (loop
+         (when (eql finger *general-area-bump*)
+           (return))
+         (let* ((object (%%assemble-value (logior finger
+                                                  (ash +address-tag-general+ +address-tag-shift+)
+                                                  *dynamic-mark-bit*)
+                                          +tag-object+))
+                (size (object-size object)))
+           (incf (svref n-allocated-objects (%object-tag object)))
+           (incf (svref allocated-objects-sizes (%object-tag object)) size)
+           (when (oddp size)
+             (incf size))
+           (scan-object object)
+           (incf finger (* size 8)))))
+    (values n-allocated-objects allocated-objects-sizes)))
+
 (defun pinned-area-info (base limit)
   ;; Yup. Scanning a pinned area atomically requires the world to be stopped.
-  (mezzano.supervisor:with-world-stopped
-    (let ((allocated-words 0)
-          (total-words 0)
-          (offset 0)
-          (largest-free-space 0))
-      (loop
-         (when (>= (+ base (* offset 8)) limit)
-           (return))
-         (let ((size (align-up (size-of-pinned-area-allocation (+ base (* offset 8))) 2))
-               ;; Carefully read the type, avoid bignums.
-               (type (ldb (byte +object-type-size+ +object-type-shift+)
-                          (memref-unsigned-byte-8 base offset))))
-           (incf total-words size)
-           (cond ((not (eql type +object-tag-freelist-entry+))
-                  (incf allocated-words size))
-                 (t ; free block.
-                  (setf largest-free-space (max largest-free-space size))))
-           (incf offset size)))
-      (values allocated-words total-words largest-free-space))))
+  (let ((n-allocated-objects (make-array (ash 1 +object-type-size+)
+                                         :initial-element 0))
+        (allocated-objects-sizes (make-array (ash 1 +object-type-size+)
+                                             :initial-element 0)))
+    (mezzano.supervisor:with-world-stopped
+      (let ((allocated-words 0)
+            (total-words 0)
+            (largest-free-space 0)
+            (address base))
+        (loop
+           (when (>= address limit)
+             (return))
+           (let ((size (align-up (size-of-pinned-area-allocation address) 2))
+                 ;; Carefully read the type, avoid bignums.
+                 (type (ldb (byte +object-type-size+ +object-type-shift+)
+                            (memref-unsigned-byte-8 address 0))))
+             (incf (svref n-allocated-objects type))
+             (incf (svref allocated-objects-sizes type) size)
+             (incf total-words size)
+             (cond ((not (eql type +object-tag-freelist-entry+))
+                    (incf allocated-words size))
+                   (t ; free block.
+                    (setf largest-free-space (max largest-free-space size))))
+             (incf address (* size 8))))
+        (values allocated-words total-words largest-free-space n-allocated-objects allocated-objects-sizes)))))
 
 (defun gc ()
   "Run a garbage-collection cycle."
@@ -488,183 +602,117 @@ This is required to make the GC interrupt safe."
                    (scavenge-stack stack-pointer frame-pointer return-address))))))))
 
 (defun gc-info-for-function-offset (function offset)
-  (multiple-value-bind (info-address length)
-      (function-gc-info function)
-    (let ((position 0)
-          ;; Defaults.
-          (framep nil)
-          (interruptp nil)
-          (pushed-values 0)
-          (pushed-values-register nil)
-          (layout-address 0)
-          (layout-length 0)
-          (multiple-values nil)
-          ;; Default to RCX here for closures & other stuff. Generally the right thing.
-          ;; Stuff can override if needed.
-          (incoming-arguments :rcx)
-          (block-or-tagbody-thunk nil)
-          (extra-registers nil))
-      (flet ((consume ()
-               ;; Read one byte from the GC metadata.
-               (when (>= position length)
-                 (mezzano.supervisor:panic "Reached end of GC Info??"))
-               (prog1 (memref-unsigned-byte-8 info-address position)
-                 (incf position))))
-        (declare (dynamic-extent #'consume))
-        (loop
-           (when (>= position length)
-             ;; No more metadata entries past here.
-             (return))
-           (let ((address 0))
-             ;; Read first byte of address, this is where we can terminate.
-             (let ((byte (consume))
-                   (offset 0))
-               (setf address (ldb (byte 7 0) byte)
-                     offset 7)
-               (when (logtest byte #x80)
-                 ;; Read remaining bytes.
-                 (loop (let ((byte (consume)))
-                         (setf (ldb (byte 7 offset) address)
-                               (ldb (byte 7 0) byte))
-                         (incf offset 7)
-                         (unless (logtest byte #x80)
-                           (return))))))
-             (when (< offset address)
-               ;; This metadata entry is past the offset, return the previous values.
-               (return))
-             ;; Read flag/pvr byte & mv-and-iabtt.
-             (let ((flags-and-pvr (consume))
-                   (mv-and-iabtt (consume)))
-               (setf framep (logtest flags-and-pvr #b0001))
-               (setf interruptp (logtest flags-and-pvr #b0010))
-               (setf pushed-values-register (if (logtest flags-and-pvr #b10000)
-                                                :rcx
-                                                nil))
-               (setf extra-registers (case (ldb (byte 2 6) flags-and-pvr)
-                                       (0 nil)
-                                       (1 :rax)
-                                       (2 :rax-rcx)
-                                       (3 :rax-rcx-rdx)))
-               (if (eql (ldb (byte 4 0) mv-and-iabtt) 15)
-                   (setf multiple-values nil)
-                   (setf multiple-values (ldb (byte 4 0) mv-and-iabtt)))
-               (setf block-or-tagbody-thunk nil
-                     incoming-arguments nil)
-               (when (logtest flags-and-pvr #b0100)
-                 (setf block-or-tagbody-thunk :rax))
-               (when (logtest flags-and-pvr #b1000)
-                 (setf incoming-arguments (if (eql (ldb (byte 4 4) mv-and-iabtt) 15)
-                                              :rcx
-                                              (ldb (byte 4 4) mv-and-iabtt)))))
-             ;; Read vs32 pv.
-             (let ((shift 0)
-                   (value 0))
-               (loop
-                  (let ((b (consume)))
-                    (when (not (logtest b #x80))
-                      (setf value (logior value (ash (logand b #x3F) shift)))
-                      (when (logtest b #x40)
-                        (setf value (- value)))
-                      (return))
-                    (setf value (logior value (ash (logand b #x7F) shift)))
-                    (incf shift 7)))
-               (setf pushed-values value))
-             ;; Read vu32 n-layout bits.
-             (let ((shift 0)
-                   (value 0))
-               (loop
-                  (let ((b (consume)))
-                    (setf value (logior value (ash (logand b #x7F) shift)))
-                    (when (not (logtest b #x80))
-                      (return))
-                    (incf shift 7)))
-               (setf layout-length value)
-               (setf layout-address (+ info-address position))
-               ;; Consume layout bits.
-               (incf position (ceiling layout-length 8))))))
-      (debug-stack-frame framep interruptp pushed-values pushed-values-register
-                         layout-address layout-length
-                         multiple-values incoming-arguments
-                         block-or-tagbody-thunk extra-registers)
-      (values framep interruptp pushed-values pushed-values-register
-              layout-address layout-length multiple-values
-              incoming-arguments block-or-tagbody-thunk
-              extra-registers))))
+  ;; Defaults.
+  (let ((framep nil)
+        (interruptp nil)
+        (pushed-values 0)
+        (pushed-values-register nil)
+        (layout-address 0)
+        (layout-length 0)
+        (multiple-values nil)
+        ;; Default to RCX here for closures & other stuff. Generally the right thing.
+        ;; Stuff can override if needed.
+        (incoming-arguments :rcx)
+        (block-or-tagbody-thunk nil)
+        (extra-registers nil))
+    (block nil
+      (flet ((f (entry-offset
+                 entry-framep entry-interruptp
+                 entry-pushed-values entry-pushed-values-register
+                 entry-layout-address entry-layout-length
+                 entry-multiple-values entry-incoming-arguments
+                 entry-block-or-tagbody-thunk entry-extra-registers)
+               (when (< offset entry-offset)
+                 ;; This metadata entry is past the offset, return the previous values.
+                 (return))
+               (setf framep entry-framep
+                     interrupt entry-interruptp
+                     pushed-values entry-pushed-values
+                     pushed-values-register entry-pushed-values-register
+                     layout-address entry-layout-address
+                     layout-length entry-layout-length
+                     multiple-values entry-multiple-values
+                     incoming-arguments entry-incoming-arguments
+                     block-or-tagbody-thunk entry-block-or-tagbody-thunk
+                     extra-registers entry-extra-registers)))
+        (declare (dynamic-extent #'f))
+        (map-function-gc-metadata #'f function)))
+    (debug-stack-frame framep interruptp pushed-values pushed-values-register
+                       layout-address layout-length
+                       multiple-values incoming-arguments
+                       block-or-tagbody-thunk extra-registers)
+    (values framep interruptp pushed-values pushed-values-register
+            layout-address layout-length multiple-values
+            incoming-arguments block-or-tagbody-thunk
+            extra-registers)))
 
 (defun scan-object-1 (object)
-  ;; Careful here. Functions with lots of GC info can have the header fall
-  ;; into bignumness when read as a ub64.
-  (let* ((address (ash (%pointer-field object) 4))
-         (type (ldb (byte +object-type-size+ +object-type-shift+)
-                    (memref-unsigned-byte-8 address 0))))
-    ;; Dispatch again based on the type.
-    (case type
-      (#.+object-tag-array-t+
-       ;; simple-vector
-       ;; 1+ to account for the header word.
-       (scan-generic object (1+ (ldb (byte +object-data-size+ +object-data-shift+)
-                                     (memref-unsigned-byte-64 address 0)))))
-      ((#.+object-tag-simple-string+
-        #.+object-tag-string+
-        #.+object-tag-simple-array+
-        #.+object-tag-array+)
-       ;; Dimensions don't need to be scanned
-       (scan-generic object 4))
-      ((#.+object-tag-complex-rational+
-        #.+object-tag-ratio+)
-       (scan-generic object 3))
-      (#.+object-tag-symbol+
-       (scan-generic object 6))
-      (#.+object-tag-structure-object+
-       (scan-generic object (1+ (ldb (byte +object-data-size+ +object-data-shift+)
-                                     (memref-unsigned-byte-64 address 0)))))
-      (#.+object-tag-std-instance+
-       (scan-generic object 3))
-      (#.+object-tag-function-reference+
-       (scan-generic object 4))
-      ((#.+object-tag-function+
-        #.+object-tag-closure+
-        #.+object-tag-funcallable-instance+)
-       (scan-function object))
-      ;; Things that don't need to be scanned.
-      ((#.+object-tag-array-fixnum+
-        #.+object-tag-array-bit+
-        #.+object-tag-array-unsigned-byte-2+
-        #.+object-tag-array-unsigned-byte-4+
-        #.+object-tag-array-unsigned-byte-8+
-        #.+object-tag-array-unsigned-byte-16+
-        #.+object-tag-array-unsigned-byte-32+
-        #.+object-tag-array-unsigned-byte-64+
-        #.+object-tag-array-signed-byte-1+
-        #.+object-tag-array-signed-byte-2+
-        #.+object-tag-array-signed-byte-4+
-        #.+object-tag-array-signed-byte-8+
-        #.+object-tag-array-signed-byte-16+
-        #.+object-tag-array-signed-byte-32+
-        #.+object-tag-array-signed-byte-64+
-        #.+object-tag-array-single-float+
-        #.+object-tag-array-double-float+
-        #.+object-tag-array-short-float+
-        #.+object-tag-array-long-float+
-        #.+object-tag-array-complex-single-float+
-        #.+object-tag-array-complex-double-float+
-        #.+object-tag-array-complex-short-float+
-        #.+object-tag-array-complex-long-float+
-        #.+object-tag-array-xmm-vector+
-        #.+object-tag-bignum+
-        #.+object-tag-double-float+
-        #.+object-tag-short-float+
-        #.+object-tag-long-float+
-        ;; not complex-rational or ratio, they may hold other numbers.
-        #.+object-tag-complex-single-float+
-        #.+object-tag-complex-double-float+
-        #.+object-tag-complex-short-float+
-        #.+object-tag-complex-long-float+
-        #.+object-tag-xmm-vector+
-        #.+object-tag-unbound-value+))
-      (#.+object-tag-thread+
-       (scan-thread object))
-      (t (scan-error object)))))
+  ;; Dispatch again based on the type.
+  (case (%object-tag object)
+    (#.+object-tag-array-t+
+     ;; simple-vector
+     ;; 1+ to account for the header word.
+     (scan-generic object (1+ (%object-header-data object))))
+    ((#.+object-tag-simple-string+
+      #.+object-tag-string+
+      #.+object-tag-simple-array+
+      #.+object-tag-array+)
+     ;; Dimensions don't need to be scanned
+     (scan-generic object 4))
+    ((#.+object-tag-complex-rational+
+      #.+object-tag-ratio+)
+     (scan-generic object 3))
+    (#.+object-tag-symbol+
+     (scan-generic object 6))
+    (#.+object-tag-structure-object+
+     (scan-generic object (1+ (%object-header-data object))))
+    (#.+object-tag-std-instance+
+     (scan-generic object 4))
+    (#.+object-tag-function-reference+
+     (scan-generic object 4))
+    ((#.+object-tag-function+
+      #.+object-tag-closure+
+      #.+object-tag-funcallable-instance+)
+     (scan-function object))
+    ;; Things that don't need to be scanned.
+    ((#.+object-tag-array-fixnum+
+      #.+object-tag-array-bit+
+      #.+object-tag-array-unsigned-byte-2+
+      #.+object-tag-array-unsigned-byte-4+
+      #.+object-tag-array-unsigned-byte-8+
+      #.+object-tag-array-unsigned-byte-16+
+      #.+object-tag-array-unsigned-byte-32+
+      #.+object-tag-array-unsigned-byte-64+
+      #.+object-tag-array-signed-byte-1+
+      #.+object-tag-array-signed-byte-2+
+      #.+object-tag-array-signed-byte-4+
+      #.+object-tag-array-signed-byte-8+
+      #.+object-tag-array-signed-byte-16+
+      #.+object-tag-array-signed-byte-32+
+      #.+object-tag-array-signed-byte-64+
+      #.+object-tag-array-single-float+
+      #.+object-tag-array-double-float+
+      #.+object-tag-array-short-float+
+      #.+object-tag-array-long-float+
+      #.+object-tag-array-complex-single-float+
+      #.+object-tag-array-complex-double-float+
+      #.+object-tag-array-complex-short-float+
+      #.+object-tag-array-complex-long-float+
+      #.+object-tag-array-xmm-vector+
+      #.+object-tag-bignum+
+      #.+object-tag-double-float+
+      #.+object-tag-short-float+
+      #.+object-tag-long-float+
+      ;; not complex-rational or ratio, they may hold other numbers.
+      #.+object-tag-complex-single-float+
+      #.+object-tag-complex-double-float+
+      #.+object-tag-complex-short-float+
+      #.+object-tag-complex-long-float+
+      #.+object-tag-xmm-vector+
+      #.+object-tag-unbound-value+))
+    (#.+object-tag-thread+
+     (scan-thread object))
+    (t (scan-error object))))
 
 (defun scan-function (object)
   ;; Scan the constant pool.
@@ -795,7 +843,7 @@ a pointer to the new object. Leaves a forwarding pointer in place."
          (#.+object-tag-symbol+
           6)
          (#.+object-tag-std-instance+
-          3)
+          4)
          (#.+object-tag-function-reference+
           4)
          ((#.+object-tag-function+

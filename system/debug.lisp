@@ -125,6 +125,7 @@
       (backtrace *default-frames-to-print*)
       (fresh-line)
       (write-line "Enter a restart number or evaluate a form. :help for help.")
+      (clear-input)
       (loop
          (let ((* nil) (** nil) (*** nil)
                (/ nil) (// nil) (/// nil)
@@ -133,7 +134,7 @@
            (loop
               (with-simple-restart (abort "Return to debugger top level.")
                 (fresh-line)
-                (format t "~D] " debug-level)
+                (format t "~A/~D] " (package-shortest-name *package*) debug-level)
                 (finish-output)
                 (let ((form (read)))
                   (fresh-line)

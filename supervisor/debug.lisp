@@ -61,13 +61,27 @@
          (debug-write-fixnum-1 fixnum base))
         (t (debug-write-char #\0))))
 
-(defun debug-write (thing)
+(defun debug-write (thing &optional (depth 0))
+  (when (> depth 10)
+    (debug-write-string "#<recursion-limit-exceeded>")
+    (return-from debug-write))
   (cond ((sys.int::character-array-p thing)
          (debug-write-string thing))
         ((symbolp thing)
          (debug-write-string (symbol-name thing)))
         ((sys.int::fixnump thing)
          (debug-write-fixnum thing))
+        ((consp thing)
+         (debug-write-string "(")
+         (debug-write (first thing) (1+ depth))
+         (do ((i (rest thing) (rest i)))
+             ((not (consp i))
+              (when i
+                (debug-write-string " . ")
+                (debug-write i (1+ depth)))
+              (debug-write-string ")"))
+           (debug-write-string " ")
+           (debug-write (first i) (1+ depth))))
         (t (debug-write-string "#<")
            (debug-write-fixnum (sys.int::lisp-object-address thing))
            (debug-write-string ">"))))
@@ -140,6 +154,7 @@
   (setf *world-stopper* (current-thread)
         *panic-in-progress* t)
   (when (eql *debug-pseudostream* 'debug-serial-stream)
+    (debug-force-output)
     (setf *debug-pseudostream* 'debug-early-serial-stream))
   (set-panic-light)
   (debug-print-line-1 things)
@@ -181,6 +196,10 @@
   (when *cold-unread-char*
     (error "Multiple unread-char!"))
   (setf *cold-unread-char* character))
+
+(defun sys.int::cold-clear-input (stream)
+  (declare (ignore stream))
+  (debug-clear-input))
 
 ;;; Early error functions, replaced later as part of cold load.
 
